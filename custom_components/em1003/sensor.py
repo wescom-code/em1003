@@ -119,7 +119,7 @@ class EM1003DataUpdateCoordinator(DataUpdateCoordinator):
                 # Don't fail the entire update if buzzer query fails
 
             # Check if we actually received any valid data
-            valid_count = sum(1 for v in data.values() if v is not None)
+            valid_count = sum(1 for k, v in data.items() if k in SENSOR_TYPES and v is not None)
             if valid_count == 0:
                 raise UpdateFailed(
                     f"Failed to read any valid sensor data from {self.mac_address} - "
@@ -184,6 +184,7 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
                 "pm10": getattr(SensorDeviceClass, "PM10", None),
                 "carbon_dioxide": getattr(SensorDeviceClass, "CARBON_DIOXIDE", None),
                 "volatile_organic_compounds": getattr(SensorDeviceClass, "VOLATILE_ORGANIC_COMPOUNDS", None),
+                "battery": getattr(SensorDeviceClass, "BATTERY", None),
             }
             self._attr_device_class = device_class_map.get(device_class_str)
             if self._attr_device_class:
@@ -328,5 +329,10 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
                 or self.coordinator.data.get(self._sensor_id) is None
             )
             attrs["data_source"] = "cached" if is_stale else "live"
+
+        if self._sensor_id == 0x05:
+            charging_state = getattr(self.coordinator.em1003_device, "battery_charging", None)
+            if charging_state is not None:
+                attrs["is_charging"] = charging_state
 
         return attrs

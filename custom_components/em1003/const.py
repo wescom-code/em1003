@@ -36,6 +36,7 @@ BUZZER_OFF = 0x00  # Buzzer off
 BUZZER_ON = 0x01  # Buzzer on
 
 # Sensor IDs (all confirmed through testing)
+SENSOR_ID_05 = 0x05  # ✓ Confirmed: Battery Level (%) and Charging Status
 SENSOR_ID_01 = 0x01  # ✓ Confirmed: Temperature (°C) - formula: (raw - 4000) / 100
 SENSOR_ID_06 = 0x06  # ✓ Confirmed: Humidity (%) - formula: raw / 100
 SENSOR_ID_08 = 0x08  # ✓ Confirmed: Noise Level (dB)
@@ -47,6 +48,15 @@ SENSOR_ID_13 = 0x13  # ✓ Confirmed: eCO2 (ppm)
 
 # Sensor definitions
 SENSOR_TYPES = {
+    SENSOR_ID_05: {
+        "id": SENSOR_ID_05,
+        "name": "Battery",
+        "key": "battery",
+        "icon": "mdi:battery",
+        "device_class": "battery",
+        "unit": "%",
+        "note": "Confirmed: Battery level percentage (0-100%)",
+    },
     SENSOR_ID_01: {
         "id": SENSOR_ID_01,
         "name": "Temperature",

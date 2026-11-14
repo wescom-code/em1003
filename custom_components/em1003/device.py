@@ -161,6 +161,7 @@ class EM1003Device:
         self._client: BleakClient | None = None
         self.sensor_data: dict[int, float | None] = {}
         self.buzzer_state: bool | None = None  # Buzzer state (True=on, False=off, None=unknown)
+        self.battery_charging: bool | None = None  # Battery charging state (True=charging, False=discharging)
         self._last_disconnect_time: float | None = None
 
         # Request cache for matching responses to requests
@@ -754,7 +755,16 @@ class EM1003Device:
                 formula_desc = ""
                 calculated_value = None
 
-                if sensor_id == 0x01:
+                if sensor_id == 0x05:
+                    # Battery Level (%) and Charging Status
+                    # value_bytes[0] is battery percentage (0-100)
+                    # value_bytes[1] bit 7 is charging status (1=charging, 0=not charging)
+                    battery_pct = value_bytes[0]
+                    is_charging = bool((value_bytes[1] >> 7) & 1) if len(value_bytes) >= 2 else False
+                    self.battery_charging = is_charging
+                    calculated_value = float(battery_pct)
+                    formula_desc = f"{battery_pct}% (charging={is_charging})"
+                elif sensor_id == 0x01:
                     # Temperature: (raw - 4000) / 100
                     calculated_value = (raw_value - 4000) / 100.0
                     formula_desc = f"({raw_value} - 4000) / 100"
@@ -779,7 +789,12 @@ class EM1003Device:
                 is_valid = True
                 filter_reason = ""
 
-                if sensor_id == 0x01:  # Temperature (°C)
+                if sensor_id == 0x05:  # Battery (%)
+                    if calculated_value < 0 or calculated_value > 100:
+                        is_valid = False
+                        filter_reason = f"out of range ({calculated_value}%)"
+
+                elif sensor_id == 0x01:  # Temperature (°C)
                     # Formula: (raw - 4000) / 100.0
                     # When sensor is unready/resetting, raw is 0x0000, which calculates to -40.0°C.
                     # Sensirion SHT30 hardware operating limit is -40.0°C to 125.0°C.
@@ -961,6 +976,15 @@ class EM1003Device:
             self._client = None
             return None
 
+    async def read_battery(self) -> tuple[float | None, bool | None]:
+        """Read battery level and charging status.
+
+        Returns:
+            Tuple of (battery_percentage, is_charging)
+        """
+        level = await self.read_sensor(0x05)
+        return (level, self.battery_charging)
+
     async def read_all_sensors(self) -> dict[int, float | None]:
         """Read all sensors using persistent connection.
 
@@ -1140,26 +1164,29 @@ class EM1003Device:
                     self._pending_requests.pop(request_key, None)
                     self._used_seq_ids.discard(seq_id)
 
+            # Store battery charging state in results
+            results["battery_charging"] = self.battery_charging
+
             # Calculate counts
-            valid_count = sum(1 for v in results.values() if v is not None)
+            valid_count = sum(1 for k, v in results.items() if k in SENSOR_TYPES and v is not None)
 
             _LOGGER.info(
                 "[DIAG] Completed reading all sensors. Valid readings: %d/%d, BLE responses: %d/%d",
                 valid_count,
-                len(results),
+                len(SENSOR_TYPES),
                 ble_response_count,
-                len(results)
+                len(SENSOR_TYPES)
             )
 
             # Record success or failure to circuit breaker:
             # We evaluate BLE health by whether the device answered our BLE requests,
             # not by whether individual sensor values were filtered out.
-            if ble_response_count >= len(results) * 0.5:
+            if ble_response_count >= len(SENSOR_TYPES) * 0.5:
                 self._circuit_breaker.record_success()
             else:
                 _LOGGER.warning(
                     "[CIRCUIT] Low BLE response rate (%d/%d), recording failure",
-                    ble_response_count, len(results)
+                    ble_response_count, len(SENSOR_TYPES)
                 )
                 self._circuit_breaker.record_failure()
 
