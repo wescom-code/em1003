@@ -5,6 +5,7 @@ import logging
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -45,6 +46,7 @@ class EM1003ActivateWifiButton(ButtonEntity):
     _attr_has_entity_name = True
     _attr_icon = "mdi:wifi-sync"
     _attr_entity_registry_enabled_default = False
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(
         self,
