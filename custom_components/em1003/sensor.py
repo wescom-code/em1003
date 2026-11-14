@@ -122,8 +122,8 @@ class EM1003DataUpdateCoordinator(DataUpdateCoordinator):
             valid_count = sum(1 for v in data.values() if v is not None)
             if valid_count == 0:
                 raise UpdateFailed(
-                    f"Failed to read any sensor data from {self.mac_address} - "
-                    "connection or device issue"
+                    f"Failed to read any valid sensor data from {self.mac_address} - "
+                    "device offline or all sensors unready"
                 )
 
             _LOGGER.debug("Sensor data updated: %s (valid: %d/%d)", data, valid_count, len(data))
@@ -214,7 +214,12 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
         # Cache for last valid value and timestamp
         self._last_valid_value: float | None = None
         self._last_update_time: datetime | None = None
-        self._stale_threshold = timedelta(minutes=20)
+
+        # Stale threshold: 3 polling cycles, at least 3 minutes (180s)
+        # Prevents transient glitches/reboots (e.g. 77s) from dropping to 0 or -40 on charts,
+        # but ensures failed sensors become Unavailable within 3 minutes instead of masking failure.
+        scan_interval_sec = coordinator.update_interval.total_seconds() if coordinator.update_interval else 60
+        self._stale_threshold = timedelta(seconds=max(scan_interval_sec * 3, 180))
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -232,8 +237,8 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
         """Return if entity is available.
 
         Consider sensor available if:
-        1. Coordinator has fresh data, OR
-        2. We have cached data that's less than 20 minutes old
+        1. Coordinator has fresh data for this specific sensor, OR
+        2. We have cached data that is within the 3-minute grace threshold.
         """
         # Check if we have fresh data from coordinator
         if self.coordinator.last_update_success:
@@ -242,14 +247,13 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
                 if current_value is not None:
                     return True
 
-        # Check if we have recent cached data
+        # Check if we have recent cached data within the grace period
         if self._last_valid_value is not None and self._last_update_time is not None:
             time_since_update = datetime.now() - self._last_update_time
             if time_since_update < self._stale_threshold:
-                # Cached data is fresh enough
                 return True
 
-        # No fresh or cached data available
+        # No fresh or valid cached data available
         return False
 
     @property
@@ -273,11 +277,10 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
             )
             return current_value
 
-        # No new data available, check if we should use cached value
+        # No new data available, check if we should use cached value within grace period
         if self._last_valid_value is not None and self._last_update_time is not None:
             time_since_update = datetime.now() - self._last_update_time
 
-            # If less than 20 minutes, return cached value
             if time_since_update < self._stale_threshold:
                 _LOGGER.debug(
                     "[VALUE] %s (0x%02x): Using cached value %s (age: %d seconds)",
@@ -288,12 +291,12 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
                 )
                 return self._last_valid_value
             else:
-                # Data is too old, mark as unavailable
                 _LOGGER.warning(
-                    "[VALUE] %s (0x%02x): Data stale for %d minutes, returning None",
+                    "[VALUE] %s (0x%02x): Data stale for %d seconds (> %d s threshold), returning None",
                     self._sensor_info["name"],
                     self._sensor_id,
-                    int(time_since_update.total_seconds() / 60)
+                    int(time_since_update.total_seconds()),
+                    int(self._stale_threshold.total_seconds())
                 )
 
         # No valid data available
@@ -315,10 +318,15 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
             "mac_address": self._mac_address,
         }
 
-        # Add last update information if available
+        # Add last update information and data freshness indicator
         if self._last_update_time is not None:
             attrs["last_update"] = self._last_update_time.isoformat()
             time_since_update = datetime.now() - self._last_update_time
             attrs["data_age_seconds"] = int(time_since_update.total_seconds())
+            is_stale = (
+                self.coordinator.data is None
+                or self.coordinator.data.get(self._sensor_id) is None
+            )
+            attrs["data_source"] = "cached" if is_stale else "live"
 
         return attrs

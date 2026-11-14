@@ -12,6 +12,7 @@ from homeassistant.components.bluetooth import (
     async_discovered_service_info,
 )
 from homeassistant.const import CONF_MAC
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import DOMAIN, CONF_MAC_ADDRESS, DEFAULT_NAME, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
@@ -131,17 +132,16 @@ class EM1003ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     @staticmethod
-    def async_get_options_flow(config_entry: config_entries.ConfigEntry):
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> config_entries.OptionsFlow:
         """Get the options flow for this handler."""
-        return EM1003OptionsFlow(config_entry)
+        return EM1003OptionsFlow()
 
 
 class EM1003OptionsFlow(config_entries.OptionsFlow):
     """Handle options flow for EM1003."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None

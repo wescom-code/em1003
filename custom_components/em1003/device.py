@@ -746,6 +746,7 @@ class EM1003Device:
 
             # Parse value based on sensor type
             # Value is in little-endian format (e.g., 0x31 0x00 = 49)
+            parsed_result: float | None = None
             if len(value_bytes) >= 2:
                 raw_value = int.from_bytes(value_bytes[:2], byteorder='little')
 
@@ -774,41 +775,97 @@ class EM1003Device:
                     calculated_value = raw_value
                     formula_desc = f"{raw_value} (direct)"
 
-                # Filter out negative values for specific sensors
-                # Skip data if negative for: Humidity, Noise, PM2.5, Formaldehyde, PM10, TVOC, eCO2
-                if sensor_id in [0x06, 0x08, 0x09, 0x0A, 0x11, 0x12, 0x13] and calculated_value < 0:
-                    _LOGGER.warning(
-                        "[FILTER] ✗ %s (0x%02x): Skipping negative value %s (formula: %s)",
-                        sensor_name, sensor_id, calculated_value, formula_desc
-                    )
-                    # Don't update sensor_data, effectively skipping this reading
+                # Validate sensor reading to filter out invalid values, sensor errors, and unready states
+                is_valid = True
+                filter_reason = ""
+
+                if sensor_id == 0x01:  # Temperature (°C)
+                    # Formula: (raw - 4000) / 100.0
+                    # When sensor is unready/resetting, raw is 0x0000, which calculates to -40.0°C.
+                    # Sensirion SHT30 hardware operating limit is -40.0°C to 125.0°C.
+                    # Valid temperatures (even extreme cold like -25°C) have non-zero raw values (e.g. 1500).
+                    # Only raw == 0 (uninitialized buffer) or raw == 0xFFFF (bus error) or out of physical limits are invalid.
+                    if raw_value == 0 or raw_value == 0xFFFF or calculated_value < -40.0 or calculated_value > 125.0:
+                        is_valid = False
+                        filter_reason = f"unready/error ({calculated_value}°C, raw={raw_value})"
+
+                elif sensor_id == 0x06:  # Humidity (%)
+                    # Formula: raw / 100.0
+                    # Relative humidity of 0.0% is physically impossible in ambient air.
+                    # Raw == 0 indicates unready/reset sensor. Raw == 0xFFFF indicates bus error.
+                    if raw_value == 0 or raw_value == 0xFFFF or calculated_value <= 0.0 or calculated_value > 100.0:
+                        is_valid = False
+                        filter_reason = f"unready/out of range ({calculated_value}%, raw={raw_value})"
+
+                elif sensor_id == 0x0A:  # Formaldehyde (mg/m³)
+                    # Upper 2 bits are device status (0 = unready/preheating, 1 = normal).
+                    # Lower 14 bits are data (0x3FFF / 16383 is error/unready code per APK HCHOModle).
+                    # Raw == 0 indicates unready/uninitialized register.
+                    hcho_raw = raw_value & 0x3FFF
+                    device_state = (raw_value >> 14) & 3
+                    if raw_value == 0 or hcho_raw == 0x3FFF or device_state == 0:
+                        is_valid = False
+                        filter_reason = f"unready/error (raw={raw_value}, state={device_state}, hcho_raw={hcho_raw})"
+                    elif calculated_value < 0:
+                        is_valid = False
+                        filter_reason = f"negative value ({calculated_value})"
+
+                elif sensor_id == 0x08:  # Noise (dB)
+                    if calculated_value < 0 or calculated_value > 140:
+                        is_valid = False
+                        filter_reason = f"out of range ({calculated_value} dB)"
+
+                elif sensor_id in [0x09, 0x11]:  # PM2.5, PM10 (µg/m³)
+                    if calculated_value < 0 or calculated_value > 1000:
+                        is_valid = False
+                        filter_reason = f"out of range ({calculated_value})"
+
+                elif sensor_id == 0x12:  # TVOC (mg/m³)
+                    if calculated_value < 0:
+                        is_valid = False
+                        filter_reason = f"negative value ({calculated_value})"
+
+                elif sensor_id == 0x13:  # eCO2 (ppm)
+                    # Baseline atmospheric CO2 concentration is ~400 ppm.
+                    if calculated_value < 400 or calculated_value > 10000:
+                        is_valid = False
+                        filter_reason = f"out of range ({calculated_value} ppm)"
+
                 else:
-                    # Only store valid (non-negative) values
-                    self.sensor_data[sensor_id] = calculated_value
+                    if calculated_value < 0:
+                        is_valid = False
+                        filter_reason = f"negative value ({calculated_value})"
 
                 unit = sensor_info.get("unit", "")
-                final_value = self.sensor_data.get(sensor_id)
-
-                # Format: 解析: 字节XX → 原始值N → 公式[...] → 最终值V 单位
                 value_hex = ' '.join([f'{b:02x}' for b in value_bytes[:2]])
                 _LOGGER.debug(
                     "[RX] 解析: 字节[%s] → 原始值%d → 公式[%s] → 最终值%s %s",
-                    value_hex, raw_value, formula_desc, final_value, unit
+                    value_hex, raw_value, formula_desc, calculated_value, unit
                 )
 
-                _LOGGER.info(
-                    "[RESP] ✓ %s (0x%02x) = %s %s",
-                    sensor_name, sensor_id, final_value, unit
-                )
+                if not is_valid:
+                    _LOGGER.warning(
+                        "[FILTER] ✗ %s (0x%02x): Skipping invalid reading: %s (formula: %s)",
+                        sensor_name, sensor_id, filter_reason, formula_desc
+                    )
+                    parsed_result = None
+                else:
+                    # Store valid value
+                    self.sensor_data[sensor_id] = calculated_value
+                    parsed_result = calculated_value
+                    _LOGGER.info(
+                        "[RESP] ✓ %s (0x%02x) = %s %s",
+                        sensor_name, sensor_id, calculated_value, unit
+                    )
             else:
                 _LOGGER.warning(
                     "[RX] ✗ %s: Value too short (got %d bytes, need at least 2)",
                     sensor_name, len(value_bytes)
                 )
 
-            # Complete the future and remove from pending requests
+            # Complete the future with parsed result (or None if invalid/filtered)
             if not pending_request.future.done():
-                pending_request.future.set_result(data)
+                pending_request.future.set_result(parsed_result)
 
             del self._pending_requests[request_key]
             self._used_seq_ids.discard(seq_id)
@@ -876,9 +933,9 @@ class EM1003Device:
 
             # Wait for response with timeout
             try:
-                await asyncio.wait_for(pending_request.future, timeout=2.0)
-                value = self.sensor_data.get(sensor_id)
-                self._circuit_breaker.record_success()
+                value = await asyncio.wait_for(pending_request.future, timeout=2.0)
+                if value is not None:
+                    self._circuit_breaker.record_success()
                 return value
             except asyncio.TimeoutError:
                 _LOGGER.warning(
@@ -955,6 +1012,8 @@ class EM1003Device:
                 [f"0x{sid:02x}" for sid in SENSOR_TYPES.keys()]
             )
 
+            ble_response_count = 0
+
             for idx, sensor_id in enumerate(SENSOR_TYPES.keys(), 1):
                 # Check if connection is still valid before each read
                 if not client.is_connected:
@@ -999,27 +1058,24 @@ class EM1003Device:
                     request_key = (seq_id, sensor_id)
                     self._pending_requests[request_key] = pending_request
 
-
                     # Send request
                     await client.write_gatt_char(EM1003_WRITE_CHAR_UUID, request, response=False)
 
-
                     # Wait for response with timeout
                     try:
-                        await asyncio.wait_for(pending_request.future, timeout=2.0)
-                        # Get parsed value from sensor_data (set by notification handler)
-                        value = self.sensor_data.get(sensor_id)
-                        results[sensor_id] = value
+                        parsed_val = await asyncio.wait_for(pending_request.future, timeout=2.0)
+                        results[sensor_id] = parsed_val
+                        ble_response_count += 1
 
                         if sensor_id in [0x11, 0x12, 0x13]:  # PM10, TVOC, eCO2
                             _LOGGER.info(
                                 "[%s] ✓ Got value: %s",
-                                sensor_name, value
+                                sensor_name, results[sensor_id]
                             )
 
                         _LOGGER.debug(
                             "[REQ] [%d/%d] ✓ Sensor 0x%02x = %s",
-                            idx, sensor_count, sensor_id, value
+                            idx, sensor_count, sensor_id, results[sensor_id]
                         )
                     except asyncio.TimeoutError:
                         if sensor_id in [0x11, 0x12, 0x13]:  # PM10, TVOC, eCO2
@@ -1084,22 +1140,26 @@ class EM1003Device:
                     self._pending_requests.pop(request_key, None)
                     self._used_seq_ids.discard(seq_id)
 
-            # Calculate success rate
-            success_count = sum(1 for v in results.values() if v is not None)
+            # Calculate counts
+            valid_count = sum(1 for v in results.values() if v is not None)
 
             _LOGGER.info(
-                "[DIAG] Completed reading all sensors. Success: %d/%d",
-                success_count,
+                "[DIAG] Completed reading all sensors. Valid readings: %d/%d, BLE responses: %d/%d",
+                valid_count,
+                len(results),
+                ble_response_count,
                 len(results)
             )
 
-            # Record success or failure to circuit breaker
-            if success_count >= len(results) * 0.5:  # At least 50% success
+            # Record success or failure to circuit breaker:
+            # We evaluate BLE health by whether the device answered our BLE requests,
+            # not by whether individual sensor values were filtered out.
+            if ble_response_count >= len(results) * 0.5:
                 self._circuit_breaker.record_success()
             else:
                 _LOGGER.warning(
-                    "[CIRCUIT] Low success rate (%d/%d), recording failure",
-                    success_count, len(results)
+                    "[CIRCUIT] Low BLE response rate (%d/%d), recording failure",
+                    ble_response_count, len(results)
                 )
                 self._circuit_breaker.record_failure()
 
