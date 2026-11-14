@@ -57,6 +57,7 @@ WIFI_STATE_DESC = {
 
 CLOUD_STATE_MAP = {
     -1: "unknown",
+    255: "unknown",
     0: "disconnected",
     1: "connected",
     101: "file_not_found",
@@ -65,6 +66,7 @@ CLOUD_STATE_MAP = {
 
 CLOUD_STATE_DESC = {
     -1: "网络情况未知",
+    255: "网络情况未知",
     0: "网络到云端不通",
     1: "网络连接成功",
     101: "自动监测文件不存在",

@@ -744,7 +744,8 @@ class EM1003Device:
                         self.wifi_sum_number = data[2]
                         self.current_wifi_index = data[3]
                         self.wifi_state = data[4]
-                        self.cloud_state = data[5]
+                        # In protocol, cloud_state is a signed byte: 0xFF is -1 (unknown)
+                        self.cloud_state = data[5] if data[5] < 128 else data[5] - 256
                         _LOGGER.info(
                             "[WIFI] Wi-Fi state=%d, Cloud state=%d, Total profiles=%d, Active profile=%d",
                             self.wifi_state, self.cloud_state, self.wifi_sum_number, self.current_wifi_index
