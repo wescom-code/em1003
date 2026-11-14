@@ -107,17 +107,6 @@ class EM1003DataUpdateCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Updating sensor data for %s", self.mac_address)
             data = await self.em1003_device.read_all_sensors()
 
-            # Also update buzzer state periodically to keep switch in sync
-            # This prevents the switch from staying unavailable if state gets out of sync
-            try:
-                _LOGGER.debug("Querying buzzer state for %s", self.mac_address)
-                buzzer_state = await self.em1003_device.read_buzzer_state()
-                if buzzer_state is not None:
-                    _LOGGER.debug("Buzzer state updated: %s", "ON" if buzzer_state else "OFF")
-            except Exception as buzzer_err:
-                _LOGGER.debug("Could not update buzzer state: %s", buzzer_err)
-                # Don't fail the entire update if buzzer query fails
-
             # Check if we actually received any valid data
             valid_count = sum(1 for k, v in data.items() if k in SENSOR_TYPES and v is not None)
             if valid_count == 0:
@@ -133,7 +122,6 @@ class EM1003DataUpdateCoordinator(DataUpdateCoordinator):
                 for sensor_id in [0x11, 0x12, 0x13]:  # PM10, TVOC, eCO2
                     value = data.get(sensor_id)
                     if value is None:
-                        from .const import SENSOR_TYPES
                         sensor_info = SENSOR_TYPES.get(sensor_id, {})
                         sensor_name = sensor_info.get("name", f"0x{sensor_id:02x}")
                         _LOGGER.info("[%s] No data received", sensor_name)

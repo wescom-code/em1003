@@ -95,7 +95,17 @@ class EM1003BuzzerSwitch(SwitchEntity):
                 self._handle_coordinator_update
             )
 
-        # Try to read initial buzzer state
+        # Check if buzzer state is already populated
+        if self._em1003_device.buzzer_state is not None:
+            self._attr_is_on = self._em1003_device.buzzer_state
+            _LOGGER.info(
+                "Initial buzzer state for %s: %s (from device cache)",
+                self._mac_address,
+                "ON" if self._attr_is_on else "OFF"
+            )
+            return
+
+        # Try to read initial buzzer state if not yet cached
         try:
             _LOGGER.debug("Reading initial buzzer state for %s", self._mac_address)
             state = await self._em1003_device.read_buzzer_state()
@@ -108,7 +118,7 @@ class EM1003BuzzerSwitch(SwitchEntity):
                 )
             else:
                 _LOGGER.warning(
-                    "Could not read initial buzzer state for %s, will retry on first interaction",
+                    "Could not read initial buzzer state for %s, will retry on coordinator update",
                     self._mac_address
                 )
                 self._attr_is_on = None
