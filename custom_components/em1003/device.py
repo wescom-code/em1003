@@ -18,6 +18,9 @@ from .const import (
     CMD_READ_SENSOR,
     CMD_BUZZER,
     CMD_BUZZER_SET_RESPONSE,
+    CMD_READ_WIFI_CURRENT_STATE,
+    CMD_READ_USB_STATE,
+    CMD_ACTIVATE_WIFI,
     BUZZER_ON,
     BUZZER_OFF,
     EM1003_NOTIFY_CHAR_UUID,
@@ -162,6 +165,11 @@ class EM1003Device:
         self.sensor_data: dict[int, float | None] = {}
         self.buzzer_state: bool | None = None  # Buzzer state (True=on, False=off, None=unknown)
         self.battery_charging: bool | None = None  # Battery charging state (True=charging, False=discharging)
+        self.wifi_state: int | None = None  # Wi-Fi status code (0-6)
+        self.cloud_state: int | None = None  # Cloud reporting status code (-1, 0, 1, 101, 102)
+        self.wifi_sum_number: int | None = None  # Total number of configured Wi-Fi profiles
+        self.current_wifi_index: int | None = None  # Currently selected Wi-Fi profile index
+        self.usb_power: bool | None = None  # USB / external power status (True=connected, False=disconnected)
         self._last_disconnect_time: float | None = None
 
         # Request cache for matching responses to requests
@@ -725,6 +733,57 @@ class EM1003Device:
                 self._used_seq_ids.discard(seq_id)
                 return
 
+            # Handle Wi-Fi and Cloud status response (0x19)
+            if cmd_type == CMD_READ_WIFI_CURRENT_STATE:
+                hex_parts = ' '.join([f'{b:02x}' for b in data])
+                _LOGGER.debug("[RX] (Wi-Fi/云端状态响应)[0x %s] len=%d", hex_parts, len(data))
+                request_key = (seq_id, CMD_READ_WIFI_CURRENT_STATE)
+                pending_request = self._pending_requests.get(request_key)
+                if pending_request:
+                    if len(data) > 5:
+                        self.wifi_sum_number = data[2]
+                        self.current_wifi_index = data[3]
+                        self.wifi_state = data[4]
+                        self.cloud_state = data[5]
+                        _LOGGER.info(
+                            "[WIFI] Wi-Fi state=%d, Cloud state=%d, Total profiles=%d, Active profile=%d",
+                            self.wifi_state, self.cloud_state, self.wifi_sum_number, self.current_wifi_index
+                        )
+                    if not pending_request.future.done():
+                        pending_request.future.set_result(data)
+                    del self._pending_requests[request_key]
+                    self._used_seq_ids.discard(seq_id)
+                return
+
+            # Handle USB power status response (0x26)
+            if cmd_type == CMD_READ_USB_STATE:
+                hex_parts = ' '.join([f'{b:02x}' for b in data])
+                _LOGGER.debug("[RX] (USB供电状态响应)[0x %s] len=%d", hex_parts, len(data))
+                request_key = (seq_id, CMD_READ_USB_STATE)
+                pending_request = self._pending_requests.get(request_key)
+                if pending_request:
+                    if len(data) > 2:
+                        self.usb_power = bool(data[2] == 1)
+                        _LOGGER.info("[USB] External USB power: %s", "Connected" if self.usb_power else "Disconnected")
+                    if not pending_request.future.done():
+                        pending_request.future.set_result(data)
+                    del self._pending_requests[request_key]
+                    self._used_seq_ids.discard(seq_id)
+                return
+
+            # Handle Activate Wi-Fi response (0x2E)
+            if cmd_type == CMD_ACTIVATE_WIFI:
+                hex_parts = ' '.join([f'{b:02x}' for b in data])
+                _LOGGER.debug("[RX] (激活Wi-Fi响应)[0x %s] len=%d", hex_parts, len(data))
+                request_key = (seq_id, CMD_ACTIVATE_WIFI)
+                pending_request = self._pending_requests.get(request_key)
+                if pending_request:
+                    if not pending_request.future.done():
+                        pending_request.future.set_result(data)
+                    del self._pending_requests[request_key]
+                    self._used_seq_ids.discard(seq_id)
+                return
+
             # Get sensor name for logging
             sensor_info = SENSOR_TYPES.get(sensor_id, {})
             sensor_name = sensor_info.get("name", f"0x{sensor_id:02x}")
@@ -1194,6 +1253,26 @@ class EM1003Device:
                 except Exception as buzzer_err:
                     _LOGGER.debug("[BUZZER] Failed to read buzzer state during sensor read: %s", buzzer_err)
 
+            # Query Wi-Fi and Cloud status while connection is open
+            if client.is_connected:
+                try:
+                    await self._read_wifi_cloud_state_internal(client)
+                except Exception as wifi_err:
+                    _LOGGER.debug("[WIFI] Failed to read wifi/cloud state during sensor read: %s", wifi_err)
+
+            # Query USB external power status while connection is open
+            if client.is_connected:
+                try:
+                    await self._read_usb_power_internal(client)
+                except Exception as usb_err:
+                    _LOGGER.debug("[USB] Failed to read usb power state during sensor read: %s", usb_err)
+
+            results["wifi_state"] = self.wifi_state
+            results["cloud_state"] = self.cloud_state
+            results["wifi_sum_number"] = self.wifi_sum_number
+            results["current_wifi_index"] = self.current_wifi_index
+            results["usb_power"] = self.usb_power
+
             # Calculate counts
             valid_count = sum(1 for k, v in results.items() if k in SENSOR_TYPES and v is not None)
 
@@ -1299,6 +1378,66 @@ class EM1003Device:
             self._pending_requests.pop(request_key, None)
             self._used_seq_ids.discard(seq_id)
             return None
+
+    async def _read_wifi_cloud_state_internal(self, client: BleakClient) -> None:
+        """Internal helper to read Wi-Fi and Cloud status using an existing connected client."""
+        self._cleanup_expired_requests()
+        seq_id = self._get_random_sequence_id()
+        request = bytes([seq_id, CMD_READ_WIFI_CURRENT_STATE, 0x00])
+
+        hex_parts = ' '.join([f'{b:02x}' for b in request])
+        _LOGGER.debug("[TX] (查询Wi-Fi/云端状态)[0x %s]", hex_parts)
+
+        pending_request = PendingRequest(
+            seq_id=seq_id,
+            sensor_id=CMD_READ_WIFI_CURRENT_STATE,
+            future=asyncio.Future(),
+            timestamp=time.time()
+        )
+        request_key = (seq_id, CMD_READ_WIFI_CURRENT_STATE)
+        self._pending_requests[request_key] = pending_request
+
+        try:
+            await client.write_gatt_char(EM1003_WRITE_CHAR_UUID, request, response=False)
+            await asyncio.wait_for(pending_request.future, timeout=2.0)
+        except asyncio.TimeoutError:
+            _LOGGER.debug("Timeout waiting for Wi-Fi/Cloud state response (seq=%02x)", seq_id)
+            self._pending_requests.pop(request_key, None)
+            self._used_seq_ids.discard(seq_id)
+        except Exception as err:
+            _LOGGER.debug("Error reading Wi-Fi/Cloud state: %s", err)
+            self._pending_requests.pop(request_key, None)
+            self._used_seq_ids.discard(seq_id)
+
+    async def _read_usb_power_internal(self, client: BleakClient) -> None:
+        """Internal helper to read USB external power status using an existing connected client."""
+        self._cleanup_expired_requests()
+        seq_id = self._get_random_sequence_id()
+        request = bytes([seq_id, CMD_READ_USB_STATE, 0x00])
+
+        hex_parts = ' '.join([f'{b:02x}' for b in request])
+        _LOGGER.debug("[TX] (查询USB供电状态)[0x %s]", hex_parts)
+
+        pending_request = PendingRequest(
+            seq_id=seq_id,
+            sensor_id=CMD_READ_USB_STATE,
+            future=asyncio.Future(),
+            timestamp=time.time()
+        )
+        request_key = (seq_id, CMD_READ_USB_STATE)
+        self._pending_requests[request_key] = pending_request
+
+        try:
+            await client.write_gatt_char(EM1003_WRITE_CHAR_UUID, request, response=False)
+            await asyncio.wait_for(pending_request.future, timeout=2.0)
+        except asyncio.TimeoutError:
+            _LOGGER.debug("Timeout waiting for USB power state response (seq=%02x)", seq_id)
+            self._pending_requests.pop(request_key, None)
+            self._used_seq_ids.discard(seq_id)
+        except Exception as err:
+            _LOGGER.debug("Error reading USB power state: %s", err)
+            self._pending_requests.pop(request_key, None)
+            self._used_seq_ids.discard(seq_id)
 
     async def read_buzzer_state(self) -> bool | None:
         """Read current buzzer state.
@@ -1478,3 +1617,71 @@ class EM1003Device:
                         await self.disconnect()
                     except Exception as disconnect_err:
                         _LOGGER.debug("[CONN] Error disconnecting after set_buzzer_state: %s", disconnect_err)
+
+    async def activate_wifi(self, wifi_index: int = 0) -> bool:
+        """Activate Wi-Fi on device.
+
+        Args:
+            wifi_index: Index of configured Wi-Fi network profile (default: 0)
+
+        Returns:
+            True if activation command was acknowledged, False otherwise
+        """
+        async with self._lock:
+            # Check circuit breaker
+            can_attempt, reason = self._circuit_breaker.can_attempt()
+            if not can_attempt:
+                _LOGGER.warning("[CIRCUIT] Blocked activate_wifi: %s", reason)
+                return False
+
+            self._cleanup_expired_requests()
+            already_connected = self._client is not None and self._client.is_connected
+
+            try:
+                client = await self._ensure_connected()
+
+                seq_id = self._get_random_sequence_id()
+                request = bytes([seq_id, CMD_ACTIVATE_WIFI, wifi_index])
+
+                hex_parts = ' '.join([f'{b:02x}' for b in request])
+                _LOGGER.info("[TX] (激活Wi-Fi)[0x %s] profile_index=%d", hex_parts, wifi_index)
+
+                pending_request = PendingRequest(
+                    seq_id=seq_id,
+                    sensor_id=CMD_ACTIVATE_WIFI,
+                    future=asyncio.Future(),
+                    timestamp=time.time()
+                )
+                request_key = (seq_id, CMD_ACTIVATE_WIFI)
+                self._pending_requests[request_key] = pending_request
+
+                await client.write_gatt_char(EM1003_WRITE_CHAR_UUID, request, response=False)
+                await asyncio.wait_for(pending_request.future, timeout=3.0)
+                _LOGGER.info("[WIFI] ✓ Wi-Fi activation command acknowledged")
+                self._circuit_breaker.record_success()
+
+                # Also try to read back status immediately if still connected
+                try:
+                    await self._read_wifi_cloud_state_internal(client)
+                except Exception:
+                    pass
+
+                return True
+            except asyncio.TimeoutError:
+                _LOGGER.warning("Timeout waiting for Wi-Fi activation response (seq=%02x)", seq_id)
+                self._pending_requests.pop((seq_id, CMD_ACTIVATE_WIFI), None)
+                self._used_seq_ids.discard(seq_id)
+                self._circuit_breaker.record_failure()
+                return False
+            except Exception as err:
+                _LOGGER.error("Error activating Wi-Fi: %s", err)
+                self._pending_requests.pop((seq_id, CMD_ACTIVATE_WIFI), None)
+                self._used_seq_ids.discard(seq_id)
+                self._circuit_breaker.record_failure()
+                return False
+            finally:
+                if not already_connected and self._client and self._client.is_connected:
+                    try:
+                        await self.disconnect()
+                    except Exception as disconnect_err:
+                        _LOGGER.debug("[CONN] Error disconnecting after activate_wifi: %s", disconnect_err)

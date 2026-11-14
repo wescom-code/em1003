@@ -30,6 +30,46 @@ EM1003_NOTIFY_CHAR_UUID = "0000FFF4-0000-1000-8000-00805F9B34FB"  # Notify chara
 CMD_READ_SENSOR = 0x06  # Command to read sensor data
 CMD_BUZZER = 0x50  # Command for buzzer control
 CMD_BUZZER_SET_RESPONSE = 0x05  # Response command for buzzer set operations
+CMD_READ_WIFI_CURRENT_STATE = 0x19  # 25: Read WiFi & Cloud status
+CMD_READ_USB_STATE = 0x26  # 38: Read USB power status
+CMD_ACTIVATE_WIFI = 0x2E  # 46: Activate WiFi profile
+
+# WiFi and Cloud status mappings
+WIFI_STATE_MAP = {
+    0: "idle",
+    1: "connecting",
+    2: "wrong_password",
+    3: "ssid_not_found",
+    4: "connection_failed",
+    5: "connected",
+    6: "timeout",
+}
+
+WIFI_STATE_DESC = {
+    0: "闲置",
+    1: "正在连接",
+    2: "密码错误",
+    3: "未找到该名称wifi",
+    4: "连接失败",
+    5: "连接成功",
+    6: "连接超时",
+}
+
+CLOUD_STATE_MAP = {
+    -1: "unknown",
+    0: "disconnected",
+    1: "connected",
+    101: "file_not_found",
+    102: "data_source_error",
+}
+
+CLOUD_STATE_DESC = {
+    -1: "网络情况未知",
+    0: "网络到云端不通",
+    1: "网络连接成功",
+    101: "自动监测文件不存在",
+    102: "数据源错误",
+}
 
 # Buzzer states
 BUZZER_OFF = 0x00  # Buzzer off

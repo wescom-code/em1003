@@ -52,7 +52,28 @@ async def async_setup_entry(
             mac_address,
             device_name,
             em1003_device,
-        )
+        ),
+        EM1003WifiConnectedBinarySensor(
+            coordinator,
+            config_entry,
+            mac_address,
+            device_name,
+            em1003_device,
+        ),
+        EM1003CloudConnectedBinarySensor(
+            coordinator,
+            config_entry,
+            mac_address,
+            device_name,
+            em1003_device,
+        ),
+        EM1003UsbPowerBinarySensor(
+            coordinator,
+            config_entry,
+            mac_address,
+            device_name,
+            em1003_device,
+        ),
     ])
 
 
@@ -118,3 +139,205 @@ class EM1003BatteryChargingBinarySensor(CoordinatorEntity, BinarySensorEntity):
         if self.coordinator.data and 0x05 in self.coordinator.data:
             attrs["battery_level"] = self.coordinator.data[0x05]
         return attrs
+
+
+class EM1003WifiConnectedBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """Binary sensor for EM1003 Wi-Fi connection state."""
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(
+        self,
+        coordinator,
+        config_entry: ConfigEntry,
+        mac_address: str,
+        device_name: str,
+        em1003_device,
+    ) -> None:
+        """Initialize the Wi-Fi connection binary sensor."""
+        super().__init__(coordinator)
+        self._config_entry = config_entry
+        self._mac_address = mac_address
+        self._device_name = device_name
+        self._em1003_device = em1003_device
+
+        self._attr_unique_id = f"{mac_address}_wifi_connected"
+        self._attr_name = "Wi-Fi Connected"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information about this EM1003 device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._mac_address)},
+            name=self._device_name,
+            manufacturer="EM1003",
+            model="BLE Air Quality Sensor",
+            connections={("mac", self._mac_address)},
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True if Wi-Fi is connected."""
+        state_code = None
+        if self.coordinator.data and "wifi_state" in self.coordinator.data:
+            state_code = self.coordinator.data.get("wifi_state")
+        if state_code is None and self._em1003_device.wifi_state is not None:
+            state_code = self._em1003_device.wifi_state
+
+        if state_code is None:
+            return None
+        return bool(state_code == 5)
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return self.coordinator.last_update_success and self.is_on is not None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return additional attributes."""
+        attrs = {
+            "mac_address": self._mac_address,
+        }
+        state_code = None
+        if self.coordinator.data and "wifi_state" in self.coordinator.data:
+            state_code = self.coordinator.data.get("wifi_state")
+        if state_code is None:
+            state_code = self._em1003_device.wifi_state
+        if state_code is not None:
+            attrs["wifi_state_code"] = state_code
+        return attrs
+
+
+class EM1003CloudConnectedBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """Binary sensor for EM1003 Cloud reporting state."""
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(
+        self,
+        coordinator,
+        config_entry: ConfigEntry,
+        mac_address: str,
+        device_name: str,
+        em1003_device,
+    ) -> None:
+        """Initialize the Cloud reporting binary sensor."""
+        super().__init__(coordinator)
+        self._config_entry = config_entry
+        self._mac_address = mac_address
+        self._device_name = device_name
+        self._em1003_device = em1003_device
+
+        self._attr_unique_id = f"{mac_address}_cloud_reporting"
+        self._attr_name = "Cloud Reporting"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information about this EM1003 device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._mac_address)},
+            name=self._device_name,
+            manufacturer="EM1003",
+            model="BLE Air Quality Sensor",
+            connections={("mac", self._mac_address)},
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True if cloud reporting is connected."""
+        cloud_code = None
+        if self.coordinator.data and "cloud_state" in self.coordinator.data:
+            cloud_code = self.coordinator.data.get("cloud_state")
+        if cloud_code is None and self._em1003_device.cloud_state is not None:
+            cloud_code = self._em1003_device.cloud_state
+
+        if cloud_code is None:
+            return None
+        return bool(cloud_code == 1)
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return self.coordinator.last_update_success and self.is_on is not None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return additional attributes."""
+        attrs = {
+            "mac_address": self._mac_address,
+        }
+        cloud_code = None
+        if self.coordinator.data and "cloud_state" in self.coordinator.data:
+            cloud_code = self.coordinator.data.get("cloud_state")
+        if cloud_code is None:
+            cloud_code = self._em1003_device.cloud_state
+        if cloud_code is not None:
+            attrs["cloud_state_code"] = cloud_code
+        return attrs
+
+
+class EM1003UsbPowerBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """Binary sensor for EM1003 USB external power state."""
+
+    _attr_device_class = BinarySensorDeviceClass.POWER
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(
+        self,
+        coordinator,
+        config_entry: ConfigEntry,
+        mac_address: str,
+        device_name: str,
+        em1003_device,
+    ) -> None:
+        """Initialize the USB power binary sensor."""
+        super().__init__(coordinator)
+        self._config_entry = config_entry
+        self._mac_address = mac_address
+        self._device_name = device_name
+        self._em1003_device = em1003_device
+
+        self._attr_unique_id = f"{mac_address}_usb_power"
+        self._attr_name = "USB Power Connected"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information about this EM1003 device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._mac_address)},
+            name=self._device_name,
+            manufacturer="EM1003",
+            model="BLE Air Quality Sensor",
+            connections={("mac", self._mac_address)},
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True if USB power is connected."""
+        usb = None
+        if self.coordinator.data and "usb_power" in self.coordinator.data:
+            usb = self.coordinator.data.get("usb_power")
+        if usb is None and self._em1003_device.usb_power is not None:
+            usb = self._em1003_device.usb_power
+
+        if usb is None:
+            return None
+        return bool(usb)
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return self.coordinator.last_update_success and self.is_on is not None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return additional attributes."""
+        return {
+            "mac_address": self._mac_address,
+        }

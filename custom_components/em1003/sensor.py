@@ -20,7 +20,17 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
-from .const import DOMAIN, CONF_MAC_ADDRESS, SENSOR_TYPES, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+from .const import (
+    DOMAIN,
+    CONF_MAC_ADDRESS,
+    SENSOR_TYPES,
+    CONF_SCAN_INTERVAL,
+    DEFAULT_SCAN_INTERVAL,
+    WIFI_STATE_MAP,
+    WIFI_STATE_DESC,
+    CLOUD_STATE_MAP,
+    CLOUD_STATE_DESC,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,6 +87,26 @@ async def async_setup_entry(
                 sensor_info,
             )
         )
+
+    # Wi-Fi and Cloud status sensors (disabled by default)
+    entities.append(
+        EM1003WifiStatusSensor(
+            coordinator,
+            config_entry,
+            mac_address,
+            device_name,
+            em1003_device,
+        )
+    )
+    entities.append(
+        EM1003CloudStatusSensor(
+            coordinator,
+            config_entry,
+            mac_address,
+            device_name,
+            em1003_device,
+        )
+    )
 
     async_add_entities(entities)
 
@@ -322,5 +352,166 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
             charging_state = getattr(self.coordinator.em1003_device, "battery_charging", None)
             if charging_state is not None:
                 attrs["is_charging"] = charging_state
+
+        return attrs
+
+
+class EM1003WifiStatusSensor(CoordinatorEntity, SensorEntity):
+    """Representation of an EM1003 Wi-Fi status sensor."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:wifi"
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(
+        self,
+        coordinator: EM1003DataUpdateCoordinator,
+        config_entry: ConfigEntry,
+        mac_address: str,
+        device_name: str,
+        em1003_device,
+    ) -> None:
+        """Initialize the Wi-Fi status sensor."""
+        super().__init__(coordinator)
+        self._config_entry = config_entry
+        self._mac_address = mac_address
+        self._device_name = device_name
+        self._em1003_device = em1003_device
+
+        self._attr_unique_id = f"{mac_address}_wifi_status"
+        self._attr_name = "Wi-Fi Status"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information about this EM1003 device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._mac_address)},
+            name=self._device_name,
+            manufacturer="EM1003",
+            model="BLE Air Quality Sensor",
+            connections={("mac", self._mac_address)},
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the state of the Wi-Fi connection."""
+        state_code = None
+        if self.coordinator.data and "wifi_state" in self.coordinator.data:
+            state_code = self.coordinator.data.get("wifi_state")
+        if state_code is None and self._em1003_device.wifi_state is not None:
+            state_code = self._em1003_device.wifi_state
+
+        if state_code is None:
+            return None
+        return WIFI_STATE_MAP.get(state_code, f"unknown_{state_code}")
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return self.coordinator.last_update_success and self.native_value is not None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return additional attributes."""
+        attrs = {
+            "mac_address": self._mac_address,
+        }
+        state_code = None
+        if self.coordinator.data and "wifi_state" in self.coordinator.data:
+            state_code = self.coordinator.data.get("wifi_state")
+        if state_code is None:
+            state_code = self._em1003_device.wifi_state
+
+        if state_code is not None:
+            attrs["status_code"] = state_code
+            attrs["description"] = WIFI_STATE_DESC.get(state_code, "未知")
+
+        wifi_sum = None
+        current_index = None
+        if self.coordinator.data:
+            wifi_sum = self.coordinator.data.get("wifi_sum_number")
+            current_index = self.coordinator.data.get("current_wifi_index")
+        if wifi_sum is None:
+            wifi_sum = self._em1003_device.wifi_sum_number
+        if current_index is None:
+            current_index = self._em1003_device.current_wifi_index
+
+        if wifi_sum is not None:
+            attrs["configured_profiles"] = wifi_sum
+        if current_index is not None:
+            attrs["active_profile_index"] = current_index
+
+        return attrs
+
+
+class EM1003CloudStatusSensor(CoordinatorEntity, SensorEntity):
+    """Representation of an EM1003 Cloud reporting status sensor."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:cloud-upload"
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(
+        self,
+        coordinator: EM1003DataUpdateCoordinator,
+        config_entry: ConfigEntry,
+        mac_address: str,
+        device_name: str,
+        em1003_device,
+    ) -> None:
+        """Initialize the Cloud status sensor."""
+        super().__init__(coordinator)
+        self._config_entry = config_entry
+        self._mac_address = mac_address
+        self._device_name = device_name
+        self._em1003_device = em1003_device
+
+        self._attr_unique_id = f"{mac_address}_cloud_status"
+        self._attr_name = "Cloud Status"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information about this EM1003 device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._mac_address)},
+            name=self._device_name,
+            manufacturer="EM1003",
+            model="BLE Air Quality Sensor",
+            connections={("mac", self._mac_address)},
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the state of cloud reporting."""
+        cloud_code = None
+        if self.coordinator.data and "cloud_state" in self.coordinator.data:
+            cloud_code = self.coordinator.data.get("cloud_state")
+        if cloud_code is None and self._em1003_device.cloud_state is not None:
+            cloud_code = self._em1003_device.cloud_state
+
+        if cloud_code is None:
+            return None
+        return CLOUD_STATE_MAP.get(cloud_code, f"unknown_{cloud_code}")
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return self.coordinator.last_update_success and self.native_value is not None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return additional attributes."""
+        attrs = {
+            "mac_address": self._mac_address,
+        }
+        cloud_code = None
+        if self.coordinator.data and "cloud_state" in self.coordinator.data:
+            cloud_code = self.coordinator.data.get("cloud_state")
+        if cloud_code is None:
+            cloud_code = self._em1003_device.cloud_state
+
+        if cloud_code is not None:
+            attrs["status_code"] = cloud_code
+            attrs["description"] = CLOUD_STATE_DESC.get(cloud_code, "未知")
 
         return attrs
