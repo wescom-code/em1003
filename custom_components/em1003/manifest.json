@@ -11,6 +11,12 @@
   "version": "1.0.4",
   "bluetooth": [
     {
+      "local_name": "3GC*"
+    },
+    {
+      "local_name": "CG3*"
+    },
+    {
       "local_name": "EM1003*"
     },
     {

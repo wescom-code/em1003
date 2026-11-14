@@ -47,6 +47,14 @@ class EM1003ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
 
         self._discovered_devices[discovery_info.address] = discovery_info
+        device_name = discovery_info.name or DEFAULT_NAME
+        self._discovered_name = device_name
+        display_name = (
+            f"{device_name} ({discovery_info.address[-8:]})"
+            if device_name != DEFAULT_NAME
+            else f"{DEFAULT_NAME} ({discovery_info.address})"
+        )
+        self.context["title_placeholders"] = {"name": display_name}
 
         return await self.async_step_bluetooth_confirm()
 
@@ -54,16 +62,23 @@ class EM1003ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Confirm discovery."""
+        device_name = getattr(self, "_discovered_name", DEFAULT_NAME)
+        display_name = (
+            f"{device_name} ({self.unique_id[-8:]})"
+            if device_name != DEFAULT_NAME
+            else f"{DEFAULT_NAME} ({self.unique_id})"
+        )
+
         if user_input is not None:
             return self.async_create_entry(
-                title=DEFAULT_NAME,
+                title=display_name,
                 data={CONF_MAC_ADDRESS: self.unique_id},
             )
 
         self._set_confirm_only()
         return self.async_show_form(
             step_id="bluetooth_confirm",
-            description_placeholders={"name": DEFAULT_NAME},
+            description_placeholders={"name": display_name},
         )
 
     async def async_step_user(
