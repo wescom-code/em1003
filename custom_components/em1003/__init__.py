@@ -114,8 +114,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, mac_address)},
         name=device_name,
-        manufacturer="EM1003",
-        model="BLE Air Quality Sensor",
+        manufacturer="720",
+        model=getattr(em1003_device, "model", "EM1003"),
+        sw_version=getattr(em1003_device, "firmware_version", None),
+        serial_number=getattr(em1003_device, "sn", None),
         connections={("mac", mac_address)},
     )
     _LOGGER.info("Device registered in device registry: %s", device_name)

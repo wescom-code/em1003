@@ -13,14 +13,20 @@ from bleak_retry_connector import establish_connection
 
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 
 from .const import (
+    DOMAIN,
     CMD_READ_SENSOR,
-    CMD_BUZZER,
-    CMD_BUZZER_SET_RESPONSE,
+    CMD_READ_SN,
     CMD_READ_WIFI_CURRENT_STATE,
+    CMD_READ_PLACEID,
     CMD_READ_USB_STATE,
     CMD_ACTIVATE_WIFI,
+    CMD_READ_BLE_VERSION,
+    CMD_READ_WIFI_VERSION,
+    CMD_BUZZER,
+    CMD_BUZZER_SET_RESPONSE,
     BUZZER_ON,
     BUZZER_OFF,
     EM1003_NOTIFY_CHAR_UUID,
@@ -172,6 +178,22 @@ class EM1003Device:
         self.usb_power: bool | None = None  # USB / external power status (True=connected, False=disconnected)
         self._last_disconnect_time: float | None = None
 
+        # Hardware variant and firmware information
+        self.sn: str | None = None
+        self.place_id: str | None = None
+        self._place_id_queried: bool = False
+        self.ble_version: str | None = None
+        self.ble_version_raw: int | None = None
+        self.wifi_version: str | None = None
+        self.wifi_version_raw: int | None = None
+        self.firmware_version: str | None = None
+        self.model: str = "EM1003"
+        self._device_info_queried: bool = False
+        self._info_query_attempts: int = 0
+
+        # Initialize default model from device name if possible
+        self._update_model_and_device_info()
+
         # Request cache for matching responses to requests
         # Key: (seq_id, sensor_id), Value: PendingRequest
         self._pending_requests: dict[tuple[int, int], PendingRequest] = {}
@@ -199,6 +221,117 @@ class EM1003Device:
         if self.device_name and self.device_name != self.mac_address:
             return f"{self.device_name} ({self.mac_address})"
         return self.mac_address
+
+    def _update_device_registry(self) -> None:
+        """Update Home Assistant device registry with detected hardware model and firmware."""
+        if not self.hass:
+            return
+        try:
+            device_registry = dr.async_get(self.hass)
+            device_entry = device_registry.async_get_device(identifiers={(DOMAIN, self.mac_address)})
+            if device_entry:
+                update_kwargs = {"manufacturer": "720"}
+                if self.model:
+                    update_kwargs["model"] = self.model
+                if self.firmware_version:
+                    update_kwargs["sw_version"] = self.firmware_version
+                if self.sn:
+                    update_kwargs["serial_number"] = self.sn
+                device_registry.async_update_device(device_entry.id, **update_kwargs)
+                _LOGGER.info(
+                    "[DEV] Updated device registry for %s: manufacturer=720, model=%s, sw_version=%s, sn=%s",
+                    self.mac_address, self.model, self.firmware_version, self.sn
+                )
+        except Exception as err:
+            _LOGGER.debug("[DEV] Error updating device registry: %s", err)
+
+    def _update_model_and_device_info(self) -> None:
+        """Determine hardware model and formatted firmware version, and update registry."""
+        model = "EM1003"
+        platform = None
+
+        place_id_str = (self.place_id or "").strip()
+        place_id_lower = place_id_str.lower()
+        device_name_upper = (self.device_name or "").strip().upper()
+        sn_upper = (self.sn or "").strip().upper()
+
+        # 1. Samsung SmartThings edition (EM1003S)
+        if (
+            place_id_lower.startswith("ss")
+            or "samsung" in place_id_lower
+            or "1003S" in device_name_upper
+            or "1003S" in sn_upper
+            or sn_upper.startswith("CG3S")
+            or device_name_upper.startswith("3GCG3S")
+        ):
+            platform = "Samsung"
+            model = "EM1003S"
+
+        # 2. Huawei HiLink edition
+        # Identified by: PlaceID starts with "hi", or SN starts with "CG301",
+        # or BLE name starts with "3GCG301", or FW raw int has high byte 0xF0 (e.g. 0xF001 / 61441, 0xF000 / 61440)
+        elif (
+            place_id_lower.startswith("hi")
+            or sn_upper.startswith("CG301")
+            or device_name_upper.startswith("3GCG301")
+            or (self.wifi_version_raw is not None and (self.wifi_version_raw >> 8) == 0xF0)
+            or (self.ble_version_raw is not None and (self.ble_version_raw >> 8) == 0xF0)
+        ):
+            platform = "HiLink"
+            model = "EM1003"
+
+        # 3. JingDong (JD / 京东微联 / 京东小家) edition
+        # Identified by: PlaceID starts with "jd", or FW raw int has high byte 0x13 (e.g. 0x1308 / 4872, 0x1302 / 4866)
+        elif (
+            place_id_lower.startswith("jd")
+            or (self.wifi_version_raw is not None and (self.wifi_version_raw >> 8) == 0x13)
+            or (self.ble_version_raw is not None and (self.ble_version_raw >> 8) == 0x13)
+        ):
+            platform = "JD"
+            model = "EM1003"
+
+        # 4. China Telecom (CT / 电信小翼管家) edition
+        elif (
+            place_id_lower.startswith("ct")
+            or sn_upper.startswith("CG3CT")
+            or device_name_upper.startswith("3GCG3CT")
+        ):
+            platform = "CT"
+            model = "EM1003"
+
+        # 5. Original 720 edition configured via 720 环境点评 App (LeanCloud 24 hex char ID)
+        elif (
+            place_id_lower.startswith("720")
+            or (len(place_id_lower) >= 16 and all(c in "0123456789abcdef" for c in place_id_lower[:16]))
+        ):
+            platform = "720"
+            model = "EM1003"
+
+        # 6. Any other non-empty PlaceID prefix
+        elif place_id_lower:
+            platform = place_id_str[:6]
+            model = "EM1003"
+
+        else:
+            # Default fallback when no specific edition signature has been detected yet
+            platform = "720"
+            model = "EM1003"
+
+        if platform:
+            self.model = f"{model} ({platform})"
+        else:
+            self.model = model
+
+        # Determine firmware version display
+        if self.wifi_version and self.ble_version:
+            self.firmware_version = f"{self.wifi_version} (BLE: {self.ble_version})"
+        elif self.wifi_version:
+            self.firmware_version = self.wifi_version
+        elif self.ble_version:
+            self.firmware_version = f"BLE: {self.ble_version}"
+
+        # Update device registry in Home Assistant
+        self._update_device_registry()
 
     def _get_random_sequence_id(self) -> int:
         """Get a random unused sequence ID.
@@ -345,6 +478,10 @@ class EM1003Device:
             device.name or "Unknown",
             device_rssi if device_rssi is not None else "N/A"
         )
+
+        if device.name and (not self.device_name or self.device_name == self.mac_address):
+            self.device_name = device.name.strip()
+            self._update_model_and_device_info()
 
         # Establish connection with timeout and retry logic
         # CRITICAL: Use max_attempts=1 to prevent slot exhaustion
@@ -779,6 +916,100 @@ class EM1003Device:
                 request_key = (seq_id, CMD_ACTIVATE_WIFI)
                 pending_request = self._pending_requests.get(request_key)
                 if pending_request:
+                    if not pending_request.future.done():
+                        pending_request.future.set_result(data)
+                    del self._pending_requests[request_key]
+                    self._used_seq_ids.discard(seq_id)
+                return
+
+            # Handle Read SN response (0x15)
+            if cmd_type == CMD_READ_SN:
+                hex_parts = ' '.join([f'{b:02x}' for b in data])
+                _LOGGER.debug("[RX] (设备SN号响应)[0x %s] len=%d", hex_parts, len(data))
+                request_key = (seq_id, CMD_READ_SN)
+                pending_request = self._pending_requests.get(request_key)
+                if pending_request:
+                    if len(data) >= 3:
+                        raw_sn = bytes([b for b in data[2:] if 32 <= b <= 126]).decode('ascii', errors='ignore').strip()
+                        if raw_sn:
+                            self.sn = raw_sn
+                            _LOGGER.info("[SN] ✓ Device Serial Number: %s", self.sn)
+                            self._update_model_and_device_info()
+                    if not pending_request.future.done():
+                        pending_request.future.set_result(data)
+                    del self._pending_requests[request_key]
+                    self._used_seq_ids.discard(seq_id)
+                return
+
+            # Handle Read PlaceID response (0x23)
+            if cmd_type == CMD_READ_PLACEID:
+                hex_parts = ' '.join([f'{b:02x}' for b in data])
+                _LOGGER.debug("[RX] (PlaceID响应)[0x %s] len=%d", hex_parts, len(data))
+                request_key = (seq_id, CMD_READ_PLACEID)
+                pending_request = self._pending_requests.get(request_key)
+                if pending_request:
+                    if len(data) >= 3:
+                        length = data[2]
+                        if length > 0 and len(data) >= 3 + length:
+                            part_bytes = data[3:3 + length]
+                            part_str = bytes([b for b in part_bytes if 32 <= b <= 126]).decode('ascii', errors='ignore').strip()
+                            if part_str:
+                                if not self.place_id:
+                                    self.place_id = part_str
+                                else:
+                                    self.place_id += part_str
+                                _LOGGER.info("[PLACEID] ✓ Device PlaceID: %s", self.place_id)
+                                self._update_model_and_device_info()
+                    if not pending_request.future.done():
+                        pending_request.future.set_result(data)
+                    del self._pending_requests[request_key]
+                    self._used_seq_ids.discard(seq_id)
+                return
+
+            # Handle Read BLE Version response (0x3D)
+            if cmd_type == CMD_READ_BLE_VERSION:
+                hex_parts = ' '.join([f'{b:02x}' for b in data])
+                _LOGGER.debug("[RX] (BLE固件版本响应)[0x %s] len=%d", hex_parts, len(data))
+                request_key = (seq_id, CMD_READ_BLE_VERSION)
+                pending_request = self._pending_requests.get(request_key)
+                if pending_request:
+                    if len(data) >= 4:
+                        raw_int = (data[2] | (data[3] << 8)) & 0xFFFF
+                        release = (data[2] >> 4) & 15
+                        beta = data[2] & 15
+                        alpha = data[3] & 0xFF
+                        self.ble_version = f"{release}.{beta}.{alpha}"
+                        self.ble_version_raw = raw_int
+                        _LOGGER.info(
+                            "[BLE_VER] ✓ BLE Firmware Version: %s (raw int: %d)",
+                            self.ble_version, raw_int
+                        )
+                        self._update_model_and_device_info()
+                    if not pending_request.future.done():
+                        pending_request.future.set_result(data)
+                    del self._pending_requests[request_key]
+                    self._used_seq_ids.discard(seq_id)
+                return
+
+            # Handle Read Wi-Fi Version response (0x41)
+            if cmd_type == CMD_READ_WIFI_VERSION:
+                hex_parts = ' '.join([f'{b:02x}' for b in data])
+                _LOGGER.debug("[RX] (Wi-Fi固件版本响应)[0x %s] len=%d", hex_parts, len(data))
+                request_key = (seq_id, CMD_READ_WIFI_VERSION)
+                pending_request = self._pending_requests.get(request_key)
+                if pending_request:
+                    if len(data) >= 4:
+                        raw_int = (data[2] | (data[3] << 8)) & 0xFFFF
+                        release = (data[2] >> 4) & 15
+                        beta = data[2] & 15
+                        alpha = data[3] & 0xFF
+                        self.wifi_version = f"{release}.{beta}.{alpha}"
+                        self.wifi_version_raw = raw_int
+                        _LOGGER.info(
+                            "[WIFI_VER] ✓ Wi-Fi Firmware Version: %s (raw int: %d)",
+                            self.wifi_version, raw_int
+                        )
+                        self._update_model_and_device_info()
                     if not pending_request.future.done():
                         pending_request.future.set_result(data)
                     del self._pending_requests[request_key]
@@ -1268,11 +1499,24 @@ class EM1003Device:
                 except Exception as usb_err:
                     _LOGGER.debug("[USB] Failed to read usb power state during sensor read: %s", usb_err)
 
+            # Query device static info (SN, PlaceID, BLE/Wi-Fi versions) if not yet fetched
+            if not self._device_info_queried and client.is_connected:
+                try:
+                    await self._read_device_static_info_internal(client)
+                except Exception as info_err:
+                    _LOGGER.debug("[INFO] Failed to read device static info: %s", info_err)
+
             results["wifi_state"] = self.wifi_state
             results["cloud_state"] = self.cloud_state
             results["wifi_sum_number"] = self.wifi_sum_number
             results["current_wifi_index"] = self.current_wifi_index
             results["usb_power"] = self.usb_power
+            results["sn"] = self.sn
+            results["place_id"] = self.place_id
+            results["model"] = self.model
+            results["firmware_version"] = self.firmware_version
+            results["ble_version"] = self.ble_version
+            results["wifi_version"] = self.wifi_version
 
             # Calculate counts
             valid_count = sum(1 for k, v in results.items() if k in SENSOR_TYPES and v is not None)
@@ -1439,6 +1683,187 @@ class EM1003Device:
             _LOGGER.debug("Error reading USB power state: %s", err)
             self._pending_requests.pop(request_key, None)
             self._used_seq_ids.discard(seq_id)
+
+    async def _read_sn_internal(self, client: BleakClient) -> str | None:
+        """Internal helper to read device Serial Number using connected client."""
+        self._cleanup_expired_requests()
+        seq_id = self._get_random_sequence_id()
+        request = bytes([seq_id, CMD_READ_SN, 0x00])
+
+        hex_parts = ' '.join([f'{b:02x}' for b in request])
+        _LOGGER.debug("[TX] (查询设备SN号)[0x %s]", hex_parts)
+
+        pending_request = PendingRequest(
+            seq_id=seq_id,
+            sensor_id=CMD_READ_SN,
+            future=asyncio.Future(),
+            timestamp=time.time()
+        )
+        request_key = (seq_id, CMD_READ_SN)
+        self._pending_requests[request_key] = pending_request
+
+        try:
+            await client.write_gatt_char(EM1003_WRITE_CHAR_UUID, request, response=False)
+            await asyncio.wait_for(pending_request.future, timeout=2.0)
+            return self.sn
+        except asyncio.TimeoutError:
+            _LOGGER.debug("Timeout waiting for SN response (seq=%02x)", seq_id)
+            self._pending_requests.pop(request_key, None)
+            self._used_seq_ids.discard(seq_id)
+            return None
+        except Exception as err:
+            _LOGGER.debug("Error reading SN: %s", err)
+            self._pending_requests.pop(request_key, None)
+            self._used_seq_ids.discard(seq_id)
+            return None
+
+    async def _read_place_id_internal(self, client: BleakClient, wifi_index: int = 0, part: int = 0) -> str | None:
+        """Internal helper to read Place ID using connected client."""
+        self._cleanup_expired_requests()
+        seq_id = self._get_random_sequence_id()
+        request = bytes([seq_id, CMD_READ_PLACEID, wifi_index, part])
+
+        hex_parts = ' '.join([f'{b:02x}' for b in request])
+        _LOGGER.debug("[TX] (查询PlaceID part=%d)[0x %s]", part, hex_parts)
+
+        pending_request = PendingRequest(
+            seq_id=seq_id,
+            sensor_id=CMD_READ_PLACEID,
+            future=asyncio.Future(),
+            timestamp=time.time()
+        )
+        request_key = (seq_id, CMD_READ_PLACEID)
+        self._pending_requests[request_key] = pending_request
+
+        try:
+            await client.write_gatt_char(EM1003_WRITE_CHAR_UUID, request, response=False)
+            await asyncio.wait_for(pending_request.future, timeout=1.0)
+            return self.place_id
+        except asyncio.TimeoutError:
+            _LOGGER.debug("Timeout waiting for PlaceID response (seq=%02x, part=%d)", seq_id, part)
+            self._pending_requests.pop(request_key, None)
+            self._used_seq_ids.discard(seq_id)
+            return None
+        except Exception as err:
+            _LOGGER.debug("Error reading PlaceID: %s", err)
+            self._pending_requests.pop(request_key, None)
+            self._used_seq_ids.discard(seq_id)
+            return None
+
+    async def _read_ble_version_internal(self, client: BleakClient) -> str | None:
+        """Internal helper to read BLE firmware version using connected client."""
+        self._cleanup_expired_requests()
+        seq_id = self._get_random_sequence_id()
+        request = bytes([seq_id, CMD_READ_BLE_VERSION, 0x00])
+
+        hex_parts = ' '.join([f'{b:02x}' for b in request])
+        _LOGGER.debug("[TX] (查询BLE固件版本)[0x %s]", hex_parts)
+
+        pending_request = PendingRequest(
+            seq_id=seq_id,
+            sensor_id=CMD_READ_BLE_VERSION,
+            future=asyncio.Future(),
+            timestamp=time.time()
+        )
+        request_key = (seq_id, CMD_READ_BLE_VERSION)
+        self._pending_requests[request_key] = pending_request
+
+        try:
+            await client.write_gatt_char(EM1003_WRITE_CHAR_UUID, request, response=False)
+            await asyncio.wait_for(pending_request.future, timeout=2.0)
+            return self.ble_version
+        except asyncio.TimeoutError:
+            _LOGGER.debug("Timeout waiting for BLE version response (seq=%02x)", seq_id)
+            self._pending_requests.pop(request_key, None)
+            self._used_seq_ids.discard(seq_id)
+            return None
+        except Exception as err:
+            _LOGGER.debug("Error reading BLE version: %s", err)
+            self._pending_requests.pop(request_key, None)
+            self._used_seq_ids.discard(seq_id)
+            return None
+
+    async def _read_wifi_version_internal(self, client: BleakClient) -> str | None:
+        """Internal helper to read Wi-Fi firmware version using connected client."""
+        self._cleanup_expired_requests()
+        seq_id = self._get_random_sequence_id()
+        request = bytes([seq_id, CMD_READ_WIFI_VERSION, 0x00])
+
+        hex_parts = ' '.join([f'{b:02x}' for b in request])
+        _LOGGER.debug("[TX] (查询Wi-Fi固件版本)[0x %s]", hex_parts)
+
+        pending_request = PendingRequest(
+            seq_id=seq_id,
+            sensor_id=CMD_READ_WIFI_VERSION,
+            future=asyncio.Future(),
+            timestamp=time.time()
+        )
+        request_key = (seq_id, CMD_READ_WIFI_VERSION)
+        self._pending_requests[request_key] = pending_request
+
+        try:
+            await client.write_gatt_char(EM1003_WRITE_CHAR_UUID, request, response=False)
+            await asyncio.wait_for(pending_request.future, timeout=2.0)
+            return self.wifi_version
+        except asyncio.TimeoutError:
+            _LOGGER.debug("Timeout waiting for Wi-Fi version response (seq=%02x)", seq_id)
+            self._pending_requests.pop(request_key, None)
+            self._used_seq_ids.discard(seq_id)
+            return None
+        except Exception as err:
+            _LOGGER.debug("Error reading Wi-Fi version: %s", err)
+            self._pending_requests.pop(request_key, None)
+            self._used_seq_ids.discard(seq_id)
+            return None
+
+    async def _read_device_static_info_internal(self, client: BleakClient) -> None:
+        """Read static device info (SN, PlaceID, BLE and Wi-Fi versions) once."""
+        _LOGGER.debug("[INFO] Reading device static information (SN, PlaceID, Firmware versions)")
+
+        # 1. Read SN (0x15)
+        if self.sn is None and client.is_connected:
+            try:
+                await self._read_sn_internal(client)
+                await asyncio.sleep(0.1)
+            except Exception as err:
+                _LOGGER.debug("[SN] Failed to read SN: %s", err)
+
+        # 2. Read PlaceID (0x23, index 0, part 0)
+        if not self._place_id_queried and client.is_connected:
+            self._place_id_queried = True
+            try:
+                await self._read_place_id_internal(client, wifi_index=0, part=0)
+                await asyncio.sleep(0.1)
+                if self.place_id and len(self.place_id) >= 16 and client.is_connected:
+                    await self._read_place_id_internal(client, wifi_index=0, part=1)
+                    await asyncio.sleep(0.1)
+            except Exception as err:
+                _LOGGER.debug("[PLACEID] Failed to read PlaceID: %s", err)
+
+        # 3. Read Wi-Fi firmware version (0x41)
+        if self.wifi_version is None and client.is_connected:
+            try:
+                await self._read_wifi_version_internal(client)
+                await asyncio.sleep(0.1)
+            except Exception as err:
+                _LOGGER.debug("[WIFI_VER] Failed to read Wi-Fi version: %s", err)
+
+        # 4. Read BLE firmware version (0x3D)
+        if self.ble_version is None and client.is_connected:
+            try:
+                await self._read_ble_version_internal(client)
+                await asyncio.sleep(0.1)
+            except Exception as err:
+                _LOGGER.debug("[BLE_VER] Failed to read BLE version: %s", err)
+
+        self._info_query_attempts += 1
+        if (self.sn and self.wifi_version and self.ble_version and self._place_id_queried) or self._info_query_attempts >= 2:
+            self._device_info_queried = True
+            self._update_model_and_device_info()
+            _LOGGER.info(
+                "[INFO] Device static info query completed: Model=%s, SN=%s, PlaceID=%s, FW=%s (Attempts: %d)",
+                self.model, self.sn, self.place_id, self.firmware_version, self._info_query_attempts
+            )
 
     async def read_buzzer_state(self) -> bool | None:
         """Read current buzzer state.

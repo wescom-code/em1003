@@ -82,8 +82,10 @@ class EM1003BuzzerSwitch(SwitchEntity):
         return DeviceInfo(
             identifiers={(DOMAIN, self._mac_address)},
             name=self._device_name,
-            manufacturer="EM1003",
-            model="BLE Air Quality Sensor",
+            manufacturer="720",
+            model=getattr(self._em1003_device, "model", "EM1003"),
+            sw_version=getattr(self._em1003_device, "firmware_version", None),
+            serial_number=getattr(self._em1003_device, "sn", None),
             connections={("mac", self._mac_address)},
         )
 

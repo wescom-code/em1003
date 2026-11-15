@@ -26,6 +26,11 @@
   - **单会话批量读取**：每次轮询在同一 BLE 连接会话中依次读取所有数据并立即断开，杜绝蓝牙连接槽位（Connection Slot）耗尽问题。
   - **断路器（Circuit Breaker）**：遇到信号微弱或通讯异常时自动熔断并退避，保护主机资源与设备电池。
   - **传感器预热保护**：自动过滤开机预热阶段的异常负温与零值，避免历史图表被脏数据污染。
+- 🏷️ **多版本硬件智能识别与设备信息呈现**：
+  - 自动通过蓝牙读取内部存储的序列号（SN）、PlaceID 与 Wi-Fi / BLE 固件版本。
+  - 厂牌统一规范呈现为 `720`。
+  - 型号自动识别并呈现为特定定制版本：如 `EM1003 (HiLink)`（华为版）、`EM1003 (JD)`（京东版）、`EM1003 (720)`（原版）、`EM1003S (Samsung)`（三星版）等。
+  - 固件版本完整显示 Wi-Fi 与 BLE 双模块固件号（如 `1.2.0 (BLE: 1.1.2)`）。
 - 🗂️ **标准实体分类与整洁排版**：严格遵循 Home Assistant 官方规范，核心指标、配置（CONFIG）、诊断（DIAGNOSTIC）分类清晰；诊断实体默认停用，避免污染主界面。
 
 ---
@@ -128,6 +133,11 @@ Version **2.0.0** introduces a fully reverse-engineered protocol implementation 
   - **Single-Session Batch Polling**: Reads all sensors, battery, buzzer, and Wi-Fi status within a single BLE connection session, preventing BLE connection slot exhaustion.
   - **Circuit Breaker**: Protects the device and Home Assistant host from Bluetooth hangs with automatic backoff.
   - **Warmup Outlier Rejection**: Discards cold-boot negative temperatures and sensor warmup artifacts.
+- 🏷️ **Hardware Variant & Firmware Detection**:
+  - Automatically reads Serial Number (SN), PlaceID, and BLE / Wi-Fi firmware versions via Bluetooth.
+  - Device Manufacturer is standardized as `720`.
+  - Device Model dynamically identifies hardware editions: `EM1003 (HiLink)` (Huawei), `EM1003 (JD)` (Jingdong), `EM1003 (720)` (Standard), `EM1003S (Samsung)` (Samsung Connect), etc.
+  - Displays dual-module firmware version (e.g. `1.2.0 (BLE: 1.1.2)`).
 - 🗂️ **Standard Entity Categories**: Properly categorized into Primary, Configuration, and Diagnostic; diagnostic and network entities are disabled by default to maintain a clean dashboard.
 
 ---

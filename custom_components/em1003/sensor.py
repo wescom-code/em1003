@@ -244,11 +244,14 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
     @property
     def device_info(self) -> DeviceInfo:
         """Return device information about this EM1003 device."""
+        dev = getattr(self.coordinator, "em1003_device", None)
         return DeviceInfo(
             identifiers={(DOMAIN, self._mac_address)},
             name=self._device_name,
-            manufacturer="EM1003",
-            model="BLE Air Quality Sensor",
+            manufacturer="720",
+            model=getattr(dev, "model", "EM1003"),
+            sw_version=getattr(dev, "firmware_version", None),
+            serial_number=getattr(dev, "sn", None),
             connections={("mac", self._mac_address)},
         )
 
@@ -386,11 +389,14 @@ class EM1003WifiStatusSensor(CoordinatorEntity, SensorEntity):
     @property
     def device_info(self) -> DeviceInfo:
         """Return device information about this EM1003 device."""
+        dev = getattr(self.coordinator, "em1003_device", None)
         return DeviceInfo(
             identifiers={(DOMAIN, self._mac_address)},
             name=self._device_name,
-            manufacturer="EM1003",
-            model="BLE Air Quality Sensor",
+            manufacturer="720",
+            model=getattr(dev, "model", "EM1003"),
+            sw_version=getattr(dev, "firmware_version", None),
+            serial_number=getattr(dev, "sn", None),
             connections={("mac", self._mac_address)},
         )
 
@@ -443,6 +449,17 @@ class EM1003WifiStatusSensor(CoordinatorEntity, SensorEntity):
         if current_index is not None:
             attrs["active_profile_index"] = current_index
 
+        if self._em1003_device.sn:
+            attrs["serial_number"] = self._em1003_device.sn
+        if self._em1003_device.place_id:
+            attrs["place_id"] = self._em1003_device.place_id
+        if self._em1003_device.model:
+            attrs["model"] = self._em1003_device.model
+        if self._em1003_device.wifi_version:
+            attrs["wifi_firmware_version"] = self._em1003_device.wifi_version
+        if self._em1003_device.ble_version:
+            attrs["ble_firmware_version"] = self._em1003_device.ble_version
+
         return attrs
 
 
@@ -475,11 +492,14 @@ class EM1003CloudStatusSensor(CoordinatorEntity, SensorEntity):
     @property
     def device_info(self) -> DeviceInfo:
         """Return device information about this EM1003 device."""
+        dev = getattr(self.coordinator, "em1003_device", None)
         return DeviceInfo(
             identifiers={(DOMAIN, self._mac_address)},
             name=self._device_name,
-            manufacturer="EM1003",
-            model="BLE Air Quality Sensor",
+            manufacturer="720",
+            model=getattr(dev, "model", "EM1003"),
+            sw_version=getattr(dev, "firmware_version", None),
+            serial_number=getattr(dev, "sn", None),
             connections={("mac", self._mac_address)},
         )
 
@@ -516,5 +536,16 @@ class EM1003CloudStatusSensor(CoordinatorEntity, SensorEntity):
         if cloud_code is not None:
             attrs["status_code"] = cloud_code
             attrs["description"] = CLOUD_STATE_DESC.get(cloud_code, "未知")
+
+        if self._em1003_device.sn:
+            attrs["serial_number"] = self._em1003_device.sn
+        if self._em1003_device.place_id:
+            attrs["place_id"] = self._em1003_device.place_id
+        if self._em1003_device.model:
+            attrs["model"] = self._em1003_device.model
+        if self._em1003_device.wifi_version:
+            attrs["wifi_firmware_version"] = self._em1003_device.wifi_version
+        if self._em1003_device.ble_version:
+            attrs["ble_firmware_version"] = self._em1003_device.ble_version
 
         return attrs

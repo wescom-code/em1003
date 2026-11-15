@@ -28,11 +28,15 @@ EM1003_NOTIFY_CHAR_UUID = "0000FFF4-0000-1000-8000-00805F9B34FB"  # Notify chara
 
 # Protocol Commands
 CMD_READ_SENSOR = 0x06  # Command to read sensor data
-CMD_BUZZER = 0x50  # Command for buzzer control
-CMD_BUZZER_SET_RESPONSE = 0x05  # Response command for buzzer set operations
+CMD_READ_SN = 0x15  # 21: Read Serial Number
 CMD_READ_WIFI_CURRENT_STATE = 0x19  # 25: Read WiFi & Cloud status
+CMD_READ_PLACEID = 0x23  # 35: Read Place ID
 CMD_READ_USB_STATE = 0x26  # 38: Read USB power status
 CMD_ACTIVATE_WIFI = 0x2E  # 46: Activate WiFi profile
+CMD_READ_BLE_VERSION = 0x3D  # 61: Read BLE Firmware Version
+CMD_READ_WIFI_VERSION = 0x41  # 65: Read Wi-Fi Firmware Version
+CMD_BUZZER = 0x50  # Command for buzzer control
+CMD_BUZZER_SET_RESPONSE = 0x05  # Response command for buzzer set operations
 
 # WiFi and Cloud status mappings
 WIFI_STATE_MAP = {
