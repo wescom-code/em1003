@@ -182,4 +182,4 @@ DEFAULT_SCAN_INTERVAL = 60  # Default polling interval in seconds
 DEVICE_TIMEOUT = 30.0
 
 # Version
-VERSION = "1.0.4"
+VERSION = "2.0.0"
