@@ -29,7 +29,7 @@ from .const import (
     ATTR_DATA,
     DEVICE_NAME_UUID,
 )
-from .device import EM1003Device
+from .device import EM1003Device, _proxy_ble_session, get_device_proxy_source
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,26 +58,33 @@ async def async_read_device_name(hass: HomeAssistant, mac_address: str) -> str |
             _LOGGER.warning("Device not found when reading name: %s", mac_address)
             return None
 
-        client = await establish_connection(
-            BleakClient,
-            device,
-            mac_address,
-            disconnected_callback=lambda _: None,
-            max_attempts=3,  # Reduced to avoid overwhelming Bluetooth stack
-            timeout=30.0,
-        )
+        # Check if advertisement already has device name (avoid connecting if name already known)
+        if device.name and device.name.strip():
+            _LOGGER.debug("Found device name from advertisement: %s", device.name.strip())
+            return device.name.strip()
 
-        try:
-            _LOGGER.debug("Connected to device %s to read name", mac_address)
+        source = get_device_proxy_source(hass, mac_address)
+        async with _proxy_ble_session(source):
+            client = await establish_connection(
+                BleakClient,
+                device,
+                mac_address,
+                disconnected_callback=lambda _: None,
+                max_attempts=3,  # Reduced to avoid overwhelming Bluetooth stack
+                timeout=30.0,
+            )
 
-            # Read the Device Name characteristic (0x2A00)
-            value = await client.read_gatt_char(DEVICE_NAME_UUID)
-            device_name = value.decode('utf-8').strip()
+            try:
+                _LOGGER.debug("Connected to device %s to read name", mac_address)
 
-            _LOGGER.info("Read device name from %s: %s", mac_address, device_name)
-            return device_name
-        finally:
-            await client.disconnect()
+                # Read the Device Name characteristic (0x2A00)
+                value = await client.read_gatt_char(DEVICE_NAME_UUID)
+                device_name = value.decode('utf-8').strip()
+
+                _LOGGER.info("Read device name from %s: %s", mac_address, device_name)
+                return device_name
+            finally:
+                await client.disconnect()
 
     except BleakError as err:
         _LOGGER.error("Bleak error reading device name from %s: %s", mac_address, err)
@@ -199,55 +206,57 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 _LOGGER.error("Device not found: %s", mac_address)
                 return
 
-            client = await establish_connection(
-                BleakClient,
-                device,
-                mac_address,
-                disconnected_callback=lambda _: None,
-                max_attempts=3,  # Reduced to avoid overwhelming Bluetooth stack
-                timeout=30.0,
-            )
+            source = get_device_proxy_source(hass, mac_address)
+            async with _proxy_ble_session(source):
+                client = await establish_connection(
+                    BleakClient,
+                    device,
+                    mac_address,
+                    disconnected_callback=lambda _: None,
+                    max_attempts=3,  # Reduced to avoid overwhelming Bluetooth stack
+                    timeout=30.0,
+                )
 
-            try:
-                _LOGGER.info("✓ Connected to device")
+                try:
+                    _LOGGER.info("✓ Connected to device")
 
-                # Get all services
-                services = client.services
+                    # Get all services
+                    services = client.services
 
-                _LOGGER.info("Found %d services:", len(services))
+                    _LOGGER.info("Found %d services:", len(services))
 
-                for service in services:
-                    _LOGGER.info("")
-                    _LOGGER.info("Service: %s", service.uuid)
-                    _LOGGER.info("  Description: %s", service.description)
-                    _LOGGER.info("  Characteristics:")
+                    for service in services:
+                        _LOGGER.info("")
+                        _LOGGER.info("Service: %s", service.uuid)
+                        _LOGGER.info("  Description: %s", service.description)
+                        _LOGGER.info("  Characteristics:")
 
-                    for char in service.characteristics:
-                        _LOGGER.info("    - UUID: %s", char.uuid)
-                        _LOGGER.info("      Description: %s", char.description)
-                        _LOGGER.info("      Properties: %s", char.properties)
-                        _LOGGER.info("      Handle: %s", char.handle)
+                        for char in service.characteristics:
+                            _LOGGER.info("    - UUID: %s", char.uuid)
+                            _LOGGER.info("      Description: %s", char.description)
+                            _LOGGER.info("      Properties: %s", char.properties)
+                            _LOGGER.info("      Handle: %s", char.handle)
 
-                        # Try to read if readable
-                        if "read" in char.properties:
-                            try:
-                                value = await client.read_gatt_char(char.uuid)
-                                _LOGGER.info("      Value (hex): %s", value.hex())
-                                _LOGGER.info("      Value (bytes): %s", list(value))
+                            # Try to read if readable
+                            if "read" in char.properties:
                                 try:
-                                    _LOGGER.info("      Value (utf-8): %s", value.decode('utf-8'))
-                                except:
-                                    pass
-                            except Exception as read_err:
-                                _LOGGER.warning("      Could not read: %s", read_err)
+                                    value = await client.read_gatt_char(char.uuid)
+                                    _LOGGER.info("      Value (hex): %s", value.hex())
+                                    _LOGGER.info("      Value (bytes): %s", list(value))
+                                    try:
+                                        _LOGGER.info("      Value (utf-8): %s", value.decode('utf-8'))
+                                    except:
+                                        pass
+                                except Exception as read_err:
+                                    _LOGGER.warning("      Could not read: %s", read_err)
 
-                        # List descriptors
-                        if char.descriptors:
-                            _LOGGER.info("      Descriptors:")
-                            for desc in char.descriptors:
-                                _LOGGER.info("        - UUID: %s, Handle: %s", desc.uuid, desc.handle)
-            finally:
-                await client.disconnect()
+                            # List descriptors
+                            if char.descriptors:
+                                _LOGGER.info("      Descriptors:")
+                                for desc in char.descriptors:
+                                    _LOGGER.info("        - UUID: %s, Handle: %s", desc.uuid, desc.handle)
+                finally:
+                    await client.disconnect()
 
         except BleakError as err:
             _LOGGER.error("Bleak error during discovery: %s", err, exc_info=True)
@@ -269,27 +278,29 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 _LOGGER.error("Device not found: %s", mac_address)
                 return
 
-            client = await establish_connection(
-                BleakClient,
-                device,
-                mac_address,
-                disconnected_callback=lambda _: None,
-                max_attempts=3,  # Reduced to avoid overwhelming Bluetooth stack
-                timeout=30.0,
-            )
+            source = get_device_proxy_source(hass, mac_address)
+            async with _proxy_ble_session(source):
+                client = await establish_connection(
+                    BleakClient,
+                    device,
+                    mac_address,
+                    disconnected_callback=lambda _: None,
+                    max_attempts=3,  # Reduced to avoid overwhelming Bluetooth stack
+                    timeout=30.0,
+                )
 
-            try:
-                _LOGGER.info("✓ Connected to device")
+                try:
+                    _LOGGER.info("✓ Connected to device")
 
-                services = client.services
-                _LOGGER.info("Services available:")
+                    services = client.services
+                    _LOGGER.info("Services available:")
 
-                for service in services:
-                    _LOGGER.info("  UUID: %s", service.uuid)
-                    _LOGGER.info("  Description: %s", service.description)
-                    _LOGGER.info("  Characteristics count: %d", len(service.characteristics))
-            finally:
-                await client.disconnect()
+                    for service in services:
+                        _LOGGER.info("  UUID: %s", service.uuid)
+                        _LOGGER.info("  Description: %s", service.description)
+                        _LOGGER.info("  Characteristics count: %d", len(service.characteristics))
+                finally:
+                    await client.disconnect()
 
         except Exception as err:
             _LOGGER.error("Error listing services: %s", err, exc_info=True)
@@ -310,32 +321,34 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 _LOGGER.error("Device not found: %s", mac_address)
                 return
 
-            client = await establish_connection(
-                BleakClient,
-                device,
-                mac_address,
-                disconnected_callback=lambda _: None,
-                max_attempts=3,  # Reduced to avoid overwhelming Bluetooth stack
-                timeout=30.0,
-            )
-
-            try:
-                _LOGGER.info("✓ Connected to device")
-
-                value = await client.read_gatt_char(char_uuid)
-
-                _LOGGER.info("✓ Read successful!")
-                _LOGGER.info("  Characteristic: %s", char_uuid)
-                _LOGGER.info("  Value (hex): %s", value.hex())
-                _LOGGER.info("  Value (bytes): %s", list(value))
-                _LOGGER.info("  Length: %d bytes", len(value))
+            source = get_device_proxy_source(hass, mac_address)
+            async with _proxy_ble_session(source):
+                client = await establish_connection(
+                    BleakClient,
+                    device,
+                    mac_address,
+                    disconnected_callback=lambda _: None,
+                    max_attempts=3,  # Reduced to avoid overwhelming Bluetooth stack
+                    timeout=30.0,
+                )
 
                 try:
-                    _LOGGER.info("  Value (utf-8): %s", value.decode('utf-8'))
-                except:
-                    pass
-            finally:
-                await client.disconnect()
+                    _LOGGER.info("✓ Connected to device")
+
+                    value = await client.read_gatt_char(char_uuid)
+
+                    _LOGGER.info("✓ Read successful!")
+                    _LOGGER.info("  Characteristic: %s", char_uuid)
+                    _LOGGER.info("  Value (hex): %s", value.hex())
+                    _LOGGER.info("  Value (bytes): %s", list(value))
+                    _LOGGER.info("  Length: %d bytes", len(value))
+
+                    try:
+                        _LOGGER.info("  Value (utf-8): %s", value.decode('utf-8'))
+                    except:
+                        pass
+                finally:
+                    await client.disconnect()
 
         except Exception as err:
             _LOGGER.error("Error reading characteristic: %s", err, exc_info=True)
@@ -371,26 +384,28 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             else:
                 data_bytes = data
 
-            client = await establish_connection(
-                BleakClient,
-                device,
-                mac_address,
-                disconnected_callback=lambda _: None,
-                max_attempts=3,  # Reduced to avoid overwhelming Bluetooth stack
-                timeout=30.0,
-            )
+            source = get_device_proxy_source(hass, mac_address)
+            async with _proxy_ble_session(source):
+                client = await establish_connection(
+                    BleakClient,
+                    device,
+                    mac_address,
+                    disconnected_callback=lambda _: None,
+                    max_attempts=3,  # Reduced to avoid overwhelming Bluetooth stack
+                    timeout=30.0,
+                )
 
-            try:
-                _LOGGER.info("✓ Connected to device")
+                try:
+                    _LOGGER.info("✓ Connected to device")
 
-                await client.write_gatt_char(char_uuid, data_bytes)
+                    await client.write_gatt_char(char_uuid, data_bytes)
 
-                _LOGGER.info("✓ Write successful!")
-                _LOGGER.info("  Characteristic: %s", char_uuid)
-                _LOGGER.info("  Data written (hex): %s", data_bytes.hex())
-                _LOGGER.info("  Data written (bytes): %s", list(data_bytes))
-            finally:
-                await client.disconnect()
+                    _LOGGER.info("✓ Write successful!")
+                    _LOGGER.info("  Characteristic: %s", char_uuid)
+                    _LOGGER.info("  Data written (hex): %s", data_bytes.hex())
+                    _LOGGER.info("  Data written (bytes): %s", list(data_bytes))
+                finally:
+                    await client.disconnect()
 
         except Exception as err:
             _LOGGER.error("Error writing characteristic: %s", err, exc_info=True)

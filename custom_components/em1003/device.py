@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import random
 import time
@@ -35,6 +36,45 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Per-proxy locks to serialize BLE operations per Bluetooth adapter/ESPHome proxy.
+# This prevents ESP_GATT_ERROR from concurrent connections on the same proxy,
+# while allowing devices on different proxies to communicate concurrently in parallel!
+_PROXY_LOCKS: dict[str, asyncio.Lock] = {}
+_PROXY_LAST_DISCONNECT: dict[str, float] = {}
+_PROXY_BLE_SETTLING_DELAY: float = 0.5  # Seconds to let BLE adapter/proxy settle between devices
+
+
+def get_device_proxy_source(hass: HomeAssistant, mac_address: str) -> str:
+    """Get the current Bluetooth proxy/adapter source identifier for a MAC address."""
+    try:
+        service_info = bluetooth.async_last_service_info(hass, mac_address, connectable=True)
+        if service_info and service_info.source:
+            return str(service_info.source).upper()
+    except Exception as err:
+        _LOGGER.debug("Could not determine BLE source for %s: %s", mac_address, err)
+    return "default"
+
+
+def _get_proxy_lock(source: str) -> asyncio.Lock:
+    """Get or create an asyncio.Lock for a specific proxy/adapter source."""
+    if source not in _PROXY_LOCKS:
+        _PROXY_LOCKS[source] = asyncio.Lock()
+    return _PROXY_LOCKS[source]
+
+
+@asynccontextmanager
+async def _proxy_ble_session(source: str):
+    """Acquire proxy-specific BLE lock and ensure radio settling delay for that proxy."""
+    lock = _get_proxy_lock(source)
+    async with lock:
+        elapsed = time.time() - _PROXY_LAST_DISCONNECT.get(source, 0.0)
+        if 0 < elapsed < _PROXY_BLE_SETTLING_DELAY:
+            await asyncio.sleep(_PROXY_BLE_SETTLING_DELAY - elapsed)
+        try:
+            yield
+        finally:
+            _PROXY_LAST_DISCONNECT[source] = time.time()
 
 
 @dataclass
@@ -215,6 +255,13 @@ class EM1003Device:
 
         # Lock to ensure BLE operations are serialized
         self._lock = asyncio.Lock()
+        self._current_source: str = "default"
+
+    def _get_proxy_source(self) -> str:
+        """Get the current Bluetooth proxy/adapter source identifier for this device."""
+        source = get_device_proxy_source(self.hass, self.mac_address)
+        self._current_source = source
+        return source
 
     def _device_id(self) -> str:
         """Get device identifier for logging."""
@@ -775,6 +822,8 @@ class EM1003Device:
             finally:
                 self._client = None
                 self._last_disconnect_time = time.time()
+                source = getattr(self, "_current_source", "default")
+                _PROXY_LAST_DISCONNECT[source] = time.time()
         else:
             _LOGGER.debug("[CONN] Already disconnected from %s", self.mac_address)
             self._client = None
@@ -1196,8 +1245,11 @@ class EM1003Device:
         Returns:
             Sensor value or None if reading fails
         """
-        async with self._lock:
-            return await self._read_sensor_locked(sensor_id)
+        source = self._get_proxy_source()
+        _LOGGER.debug("[LOCK] Using BLE lock for proxy '%s' (%s)", source, self.mac_address)
+        async with _proxy_ble_session(source):
+            async with self._lock:
+                return await self._read_sensor_locked(sensor_id)
 
     async def _read_sensor_locked(self, sensor_id: int) -> float | None:
         """Internal implementation of read_sensor (must hold self._lock)."""
@@ -1248,13 +1300,13 @@ class EM1003Device:
 
             # Wait for response with timeout
             try:
-                value = await asyncio.wait_for(pending_request.future, timeout=2.0)
+                value = await asyncio.wait_for(pending_request.future, timeout=3.0)
                 if value is not None:
                     self._circuit_breaker.record_success()
                 return value
             except asyncio.TimeoutError:
                 _LOGGER.warning(
-                    "Timeout waiting for sensor 0x%02x response (seq=%02x)",
+                    "Timeout (3s) waiting for sensor 0x%02x response (seq=%02x)",
                     sensor_id, seq_id
                 )
                 # Clean up pending request
@@ -1301,8 +1353,11 @@ class EM1003Device:
         Returns:
             Dictionary mapping sensor IDs to their values
         """
-        async with self._lock:
-            return await self._read_all_sensors_locked()
+        source = self._get_proxy_source()
+        _LOGGER.debug("[LOCK] Using BLE lock for proxy '%s' (%s)", source, self.mac_address)
+        async with _proxy_ble_session(source):
+            async with self._lock:
+                return await self._read_all_sensors_locked()
 
     async def _read_all_sensors_locked(self) -> dict[int, float | None]:
         """Internal implementation of read_all_sensors (must hold self._lock)."""
@@ -1398,7 +1453,7 @@ class EM1003Device:
 
                     # Wait for response with timeout
                     try:
-                        parsed_val = await asyncio.wait_for(pending_request.future, timeout=2.0)
+                        parsed_val = await asyncio.wait_for(pending_request.future, timeout=3.0)
                         results[sensor_id] = parsed_val
                         ble_response_count += 1
 
@@ -1415,12 +1470,12 @@ class EM1003Device:
                     except asyncio.TimeoutError:
                         if sensor_id in [0x11, 0x12, 0x13]:  # PM10, TVOC, eCO2
                             _LOGGER.warning(
-                                "[%s] ✗ TIMEOUT (2s) - sensor 0x%02x not responding",
+                                "[%s] ✗ TIMEOUT (3s) - sensor 0x%02x not responding",
                                 sensor_name, sensor_id
                             )
                         else:
                             _LOGGER.warning(
-                                "[REQ] [%d/%d] ✗ Timeout waiting for sensor 0x%02x response (seq=%02x)",
+                                "[REQ] [%d/%d] ✗ Timeout (3s) waiting for sensor 0x%02x response (seq=%02x)",
                                 idx, sensor_count, sensor_id, seq_id
                             )
                         results[sensor_id] = None
@@ -1871,43 +1926,45 @@ class EM1003Device:
         Returns:
             True if buzzer is on, False if off, None if reading fails
         """
-        async with self._lock:
-            # Check circuit breaker
-            can_attempt, reason = self._circuit_breaker.can_attempt()
-            if not can_attempt:
-                _LOGGER.warning(
-                    "[CIRCUIT] Blocked read_buzzer_state: %s",
-                    reason
-                )
-                return None
+        source = self._get_proxy_source()
+        async with _proxy_ble_session(source):
+            async with self._lock:
+                # Check circuit breaker
+                can_attempt, reason = self._circuit_breaker.can_attempt()
+                if not can_attempt:
+                    _LOGGER.warning(
+                        "[CIRCUIT] Blocked read_buzzer_state: %s",
+                        reason
+                    )
+                    return None
 
-            already_connected = self._client is not None and self._client.is_connected
-            try:
-                # Ensure connection
-                client = await self._ensure_connected()
-                res = await self._read_buzzer_state_internal(client)
-                if res is not None:
-                    self._circuit_breaker.record_success()
-                else:
+                already_connected = self._client is not None and self._client.is_connected
+                try:
+                    # Ensure connection
+                    client = await self._ensure_connected()
+                    res = await self._read_buzzer_state_internal(client)
+                    if res is not None:
+                        self._circuit_breaker.record_success()
+                    else:
+                        self._circuit_breaker.record_failure()
+                    return res
+
+                except BleakError as err:
+                    _LOGGER.error("Bleak error reading buzzer state: %s", err)
                     self._circuit_breaker.record_failure()
-                return res
-
-            except BleakError as err:
-                _LOGGER.error("Bleak error reading buzzer state: %s", err)
-                self._circuit_breaker.record_failure()
-                self._client = None
-                return None
-            except Exception as err:
-                _LOGGER.error("Error reading buzzer state: %s", err, exc_info=True)
-                self._circuit_breaker.record_failure()
-                self._client = None
-                return None
-            finally:
-                if not already_connected and self._client and self._client.is_connected:
-                    try:
-                        await self.disconnect()
-                    except Exception as disconnect_err:
-                        _LOGGER.debug("[CONN] Error disconnecting after read_buzzer_state: %s", disconnect_err)
+                    self._client = None
+                    return None
+                except Exception as err:
+                    _LOGGER.error("Error reading buzzer state: %s", err, exc_info=True)
+                    self._circuit_breaker.record_failure()
+                    self._client = None
+                    return None
+                finally:
+                    if not already_connected and self._client and self._client.is_connected:
+                        try:
+                            await self.disconnect()
+                        except Exception as disconnect_err:
+                            _LOGGER.debug("[CONN] Error disconnecting after read_buzzer_state: %s", disconnect_err)
 
     async def set_buzzer_state(self, turn_on: bool) -> bool:
         """Set buzzer state.
@@ -1918,15 +1975,17 @@ class EM1003Device:
         Returns:
             True if successful, False otherwise
         """
-        async with self._lock:
-            # Check circuit breaker
-            can_attempt, reason = self._circuit_breaker.can_attempt()
-            if not can_attempt:
-                _LOGGER.warning(
-                    "[CIRCUIT] Blocked set_buzzer_state: %s",
-                    reason
-                )
-                return False
+        source = self._get_proxy_source()
+        async with _proxy_ble_session(source):
+            async with self._lock:
+                # Check circuit breaker
+                can_attempt, reason = self._circuit_breaker.can_attempt()
+                if not can_attempt:
+                    _LOGGER.warning(
+                        "[CIRCUIT] Blocked set_buzzer_state: %s",
+                        reason
+                    )
+                    return False
 
             # Clean up expired requests
             self._cleanup_expired_requests()
@@ -2053,12 +2112,14 @@ class EM1003Device:
         Returns:
             True if activation command was acknowledged, False otherwise
         """
-        async with self._lock:
-            # Check circuit breaker
-            can_attempt, reason = self._circuit_breaker.can_attempt()
-            if not can_attempt:
-                _LOGGER.warning("[CIRCUIT] Blocked activate_wifi: %s", reason)
-                return False
+        source = self._get_proxy_source()
+        async with _proxy_ble_session(source):
+            async with self._lock:
+                # Check circuit breaker
+                can_attempt, reason = self._circuit_breaker.can_attempt()
+                if not can_attempt:
+                    _LOGGER.warning("[CIRCUIT] Blocked activate_wifi: %s", reason)
+                    return False
 
             self._cleanup_expired_requests()
             already_connected = self._client is not None and self._client.is_connected

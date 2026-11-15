@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from datetime import datetime, timedelta
 
 from homeassistant.components.sensor import (
@@ -60,9 +61,10 @@ async def async_setup_entry(
     # Store coordinator in hass.data so switch can access it
     hass.data[DOMAIN][config_entry.entry_id]["coordinator"] = coordinator
 
-    # Add a small delay before first refresh to allow device to be ready
-    _LOGGER.debug("Waiting for device to be ready before initial refresh...")
-    await asyncio.sleep(2.0)
+    # Stagger initial refresh across devices to avoid startup contention
+    init_delay = random.uniform(1.0, 4.0)
+    _LOGGER.debug("Waiting %.1fs before initial refresh...", init_delay)
+    await asyncio.sleep(init_delay)
 
     # Fetch initial data with better error handling
     try:
