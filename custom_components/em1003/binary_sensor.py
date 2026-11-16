@@ -54,6 +54,13 @@ async def async_setup_entry(
             device_name,
             em1003_device,
         ),
+        EM1003MeasuringBinarySensor(
+            coordinator,
+            config_entry,
+            mac_address,
+            device_name,
+            em1003_device,
+        ),
         EM1003WifiConnectedBinarySensor(
             coordinator,
             config_entry,
@@ -354,3 +361,69 @@ class EM1003UsbPowerBinarySensor(CoordinatorEntity, BinarySensorEntity):
         return {
             "mac_address": self._mac_address,
         }
+
+
+class EM1003MeasuringBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """Binary sensor for EM1003 active measuring / dormant state."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator,
+        config_entry: ConfigEntry,
+        mac_address: str,
+        device_name: str,
+        em1003_device,
+    ) -> None:
+        """Initialize the measuring binary sensor."""
+        super().__init__(coordinator)
+        self._config_entry = config_entry
+        self._mac_address = mac_address
+        self._device_name = device_name
+        self._em1003_device = em1003_device
+
+        self._attr_unique_id = f"{mac_address}_measuring"
+        self._attr_name = "Measuring State"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information about this EM1003 device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._mac_address)},
+            name=self._device_name,
+            manufacturer="720",
+            model=getattr(self._em1003_device, "model", "EM1003"),
+            sw_version=getattr(self._em1003_device, "firmware_version", None),
+            serial_number=getattr(self._em1003_device, "sn", None),
+            connections={("mac", self._mac_address)},
+        )
+
+    @property
+    def icon(self) -> str:
+        """Return icon based on measuring state."""
+        return "mdi:gauge" if self.is_on else "mdi:power-sleep"
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if device is actively measuring."""
+        if self.coordinator.data and "is_measuring" in self.coordinator.data:
+            return bool(self.coordinator.data["is_measuring"])
+        return bool(getattr(self._em1003_device, "is_measuring", True))
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return self.coordinator.last_update_success
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return extra state attributes."""
+        return {
+            "mac_address": self._mac_address,
+            "usb_power": getattr(self._em1003_device, "usb_power", None),
+            "hcho_state": getattr(self._em1003_device, "hcho_state", None),
+            "sleep_mode": not self.is_on,
+        }
+

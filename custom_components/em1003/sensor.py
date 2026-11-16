@@ -25,6 +25,7 @@ from homeassistant.helpers.update_coordinator import (
 from .const import (
     DOMAIN,
     CONF_MAC_ADDRESS,
+    SENSOR_ID_05,
     SENSOR_TYPES,
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
@@ -262,9 +263,18 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
         """Return if entity is available.
 
         Consider sensor available if:
-        1. Coordinator has fresh data for this specific sensor, OR
-        2. We have cached data that is within the 3-minute grace threshold.
+        1. Device is actively measuring (for environmental sensors). If running on battery
+           and internal sensors are dormant, environmental entities are marked unavailable
+           to prevent displaying frozen stale values.
+        2. Coordinator has fresh data for this specific sensor, OR
+        3. We have cached data that is within the 3-minute grace threshold.
         """
+        # Battery sensor (0x05) is a device metric and remains available as long as coordinator updates
+        if self._sensor_id != SENSOR_ID_05:
+            dev = getattr(self.coordinator, "em1003_device", None)
+            if dev and not dev.is_measuring:
+                return False
+
         # Check if we have fresh data from coordinator
         if self.coordinator.last_update_success:
             if self.coordinator.data is not None:
@@ -284,6 +294,12 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self) -> float | None:
         """Return the state of the sensor."""
+        # For environmental sensors, if device is not measuring, do not return cached/stale values
+        if self._sensor_id != SENSOR_ID_05:
+            dev = getattr(self.coordinator, "em1003_device", None)
+            if dev and not dev.is_measuring:
+                return None
+
         # Get current value from coordinator
         current_value = None
         if self.coordinator.data is not None:

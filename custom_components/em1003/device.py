@@ -216,6 +216,7 @@ class EM1003Device:
         self.wifi_sum_number: int | None = None  # Total number of configured Wi-Fi profiles
         self.current_wifi_index: int | None = None  # Currently selected Wi-Fi profile index
         self.usb_power: bool | None = None  # USB / external power status (True=connected, False=disconnected)
+        self.hcho_state: int | None = None  # Formaldehyde sensor state (0=unready/dormant, 1=measuring)
         self._last_disconnect_time: float | None = None
 
         # Hardware variant and firmware information
@@ -256,6 +257,24 @@ class EM1003Device:
         # Lock to ensure BLE operations are serialized
         self._lock = asyncio.Lock()
         self._current_source: str = "default"
+
+    @property
+    def is_measuring(self) -> bool:
+        """Return True if device sensors are actively measuring fresh data.
+
+        When external USB power is connected, the device operates continuously.
+        When running on battery (USB disconnected), internal sensors power down to save
+        battery unless actively measuring (indicated by hcho_state == 1).
+        If hcho_state is 0 while USB is disconnected, the device is dormant/sleeping
+        and any environmental sensor readings in MCU RAM are stale/frozen.
+        """
+        if self.usb_power is True:
+            return True
+        if self.usb_power is False:
+            return bool(self.hcho_state == 1)
+        if self.hcho_state is not None:
+            return bool(self.hcho_state == 1)
+        return True
 
     def _get_proxy_source(self) -> str:
         """Get the current Bluetooth proxy/adapter source identifier for this device."""
@@ -952,6 +971,9 @@ class EM1003Device:
                     if len(data) > 2:
                         self.usb_power = bool(data[2] == 1)
                         _LOGGER.info("[USB] External USB power: %s", "Connected" if self.usb_power else "Disconnected")
+                        # If USB power is disconnected, battery cannot be charging
+                        if self.usb_power is False and self.battery_charging:
+                            self.battery_charging = False
                     if not pending_request.future.done():
                         pending_request.future.set_result(data)
                     del self._pending_requests[request_key]
@@ -1103,7 +1125,14 @@ class EM1003Device:
                     # value_bytes[0] is battery percentage (0-100)
                     # value_bytes[1] bit 7 is charging status (1=charging, 0=not charging)
                     battery_pct = value_bytes[0]
-                    is_charging = bool((value_bytes[1] >> 7) & 1) if len(value_bytes) >= 2 else False
+                    raw_charging = bool((value_bytes[1] >> 7) & 1) if len(value_bytes) >= 2 else False
+                    # Cross-validate charging with USB power status:
+                    # If USB external power is known to be Disconnected, the battery cannot be charging.
+                    # This prevents hardware/PMIC under-voltage warning flags (e.g. 0xec) from misreporting charging.
+                    if self.usb_power is False:
+                        is_charging = False
+                    else:
+                        is_charging = raw_charging
                     self.battery_charging = is_charging
                     calculated_value = float(battery_pct)
                     formula_desc = f"{battery_pct}% (charging={is_charging})"
@@ -1161,6 +1190,7 @@ class EM1003Device:
                     # Raw == 0 indicates unready/uninitialized register.
                     hcho_raw = raw_value & 0x3FFF
                     device_state = (raw_value >> 14) & 3
+                    self.hcho_state = device_state
                     if raw_value == 0 or hcho_raw == 0x3FFF or device_state == 0:
                         is_valid = False
                         filter_reason = f"unready/error (raw={raw_value}, state={device_state}, hcho_raw={hcho_raw})"
@@ -1394,6 +1424,13 @@ class EM1003Device:
                 self.mac_address
             )
 
+            # Query USB external power status first so power mode is known prior to reading sensors
+            if client.is_connected:
+                try:
+                    await self._read_usb_power_internal(client)
+                except Exception as usb_err:
+                    _LOGGER.debug("[USB] Failed to read usb power state prior to sensor reads: %s", usb_err)
+
             # Read all sensors using the persistent connection
             sensor_count = len(SENSOR_TYPES)
             _LOGGER.debug(
@@ -1530,8 +1567,23 @@ class EM1003Device:
                     self._pending_requests.pop(request_key, None)
                     self._used_seq_ids.discard(seq_id)
 
-            # Store battery charging state in results
+            # If device is running on battery (USB disconnected) and internal sensors are dormant,
+            # suppress stale/frozen environmental readings from MCU RAM.
+            if not self.is_measuring:
+                _LOGGER.warning(
+                    "[SLEEP] Device %s is running on battery (USB disconnected) and internal sensors are dormant (hcho_state=%s). "
+                    "Suppressing stale/frozen environmental readings to prevent misleading data.",
+                    self.mac_address, self.hcho_state
+                )
+                for env_sid in [0x01, 0x06, 0x08, 0x09, 0x0A, 0x11, 0x12, 0x13]:
+                    results[env_sid] = None
+
+            # Re-verify charging state against USB power
+            if self.usb_power is False:
+                self.battery_charging = False
             results["battery_charging"] = self.battery_charging
+            results["is_measuring"] = self.is_measuring
+            results["hcho_state"] = self.hcho_state
 
             # Also query buzzer state while connection is open
             if client.is_connected:
@@ -1546,13 +1598,6 @@ class EM1003Device:
                     await self._read_wifi_cloud_state_internal(client)
                 except Exception as wifi_err:
                     _LOGGER.debug("[WIFI] Failed to read wifi/cloud state during sensor read: %s", wifi_err)
-
-            # Query USB external power status while connection is open
-            if client.is_connected:
-                try:
-                    await self._read_usb_power_internal(client)
-                except Exception as usb_err:
-                    _LOGGER.debug("[USB] Failed to read usb power state during sensor read: %s", usb_err)
 
             # Query device static info (SN, PlaceID, BLE/Wi-Fi versions) if not yet fetched
             if not self._device_info_queried and client.is_connected:
