@@ -19,6 +19,8 @@ from homeassistant.helpers import device_registry as dr
 from .const import (
     DOMAIN,
     CMD_READ_SENSOR,
+    CMD_START_MEASURE,
+    CMD_STOP_MEASURE,
     CMD_READ_SN,
     CMD_READ_WIFI_CURRENT_STATE,
     CMD_READ_PLACEID,
@@ -217,6 +219,11 @@ class EM1003Device:
         self.current_wifi_index: int | None = None  # Currently selected Wi-Fi profile index
         self.usb_power: bool | None = None  # USB / external power status (True=connected, False=disconnected)
         self.hcho_state: int | None = None  # Formaldehyde sensor state (0=unready/dormant, 1=measuring)
+        self.battery_pct: float | None = None  # Battery percentage (0-100)
+        self._is_dormant: bool = False  # True when device sensors & fan are dormant / sleeping on battery
+        self._frozen_cycle_count: int = 0  # Counter for consecutive identical sensor snapshots
+        self._last_env_snapshot: tuple | None = None  # (temp, humid, noise, pm25) snapshot of previous cycle
+        self._manual_measure_active: bool = False  # Explicitly started measurement via HA switch
         self._last_disconnect_time: float | None = None
 
         # Hardware variant and firmware information
@@ -264,17 +271,9 @@ class EM1003Device:
 
         When external USB power is connected, the device operates continuously.
         When running on battery (USB disconnected), internal sensors power down to save
-        battery unless actively measuring (indicated by hcho_state == 1).
-        If hcho_state is 0 while USB is disconnected, the device is dormant/sleeping
-        and any environmental sensor readings in MCU RAM are stale/frozen.
+        battery unless actively measuring.
         """
-        if self.usb_power is True:
-            return True
-        if self.usb_power is False:
-            return bool(self.hcho_state == 1)
-        if self.hcho_state is not None:
-            return bool(self.hcho_state == 1)
-        return True
+        return not self._is_dormant
 
     def _get_proxy_source(self) -> str:
         """Get the current Bluetooth proxy/adapter source identifier for this device."""
@@ -993,6 +992,46 @@ class EM1003Device:
                     self._used_seq_ids.discard(seq_id)
                 return
 
+            # Handle Start Measure response (0x12)
+            if cmd_type == CMD_START_MEASURE:
+                hex_parts = ' '.join([f'{b:02x}' for b in data])
+                _LOGGER.debug("[RX] (开始测量响应)[0x %s] len=%d", hex_parts, len(data))
+                request_key = (seq_id, CMD_START_MEASURE)
+                pending_request = self._pending_requests.get(request_key)
+                if not pending_request:
+                    for k, req in list(self._pending_requests.items()):
+                        if k[1] == CMD_START_MEASURE:
+                            request_key = k
+                            pending_request = req
+                            break
+                if pending_request:
+                    _LOGGER.info("[RESP] ✓ Start measurement acknowledged")
+                    if not pending_request.future.done():
+                        pending_request.future.set_result(data)
+                    self._pending_requests.pop(request_key, None)
+                    self._used_seq_ids.discard(seq_id)
+                return
+
+            # Handle Stop Measure response (0x13)
+            if cmd_type == CMD_STOP_MEASURE:
+                hex_parts = ' '.join([f'{b:02x}' for b in data])
+                _LOGGER.debug("[RX] (停止测量响应)[0x %s] len=%d", hex_parts, len(data))
+                request_key = (seq_id, CMD_STOP_MEASURE)
+                pending_request = self._pending_requests.get(request_key)
+                if not pending_request:
+                    for k, req in list(self._pending_requests.items()):
+                        if k[1] == CMD_STOP_MEASURE:
+                            request_key = k
+                            pending_request = req
+                            break
+                if pending_request:
+                    _LOGGER.info("[RESP] ✓ Stop measurement acknowledged")
+                    if not pending_request.future.done():
+                        pending_request.future.set_result(data)
+                    self._pending_requests.pop(request_key, None)
+                    self._used_seq_ids.discard(seq_id)
+                return
+
             # Handle Read SN response (0x15)
             if cmd_type == CMD_READ_SN:
                 hex_parts = ' '.join([f'{b:02x}' for b in data])
@@ -1134,6 +1173,7 @@ class EM1003Device:
                     else:
                         is_charging = raw_charging
                     self.battery_charging = is_charging
+                    self.battery_pct = float(battery_pct)
                     calculated_value = float(battery_pct)
                     formula_desc = f"{battery_pct}% (charging={is_charging})"
                 elif sensor_id == 0x01:
@@ -1566,6 +1606,53 @@ class EM1003Device:
                     request_key = (seq_id, sensor_id)
                     self._pending_requests.pop(request_key, None)
                     self._used_seq_ids.discard(seq_id)
+
+            # Evaluate dormant vs active measuring state
+            current_env_snapshot = (
+                results.get(0x01),
+                results.get(0x06),
+                results.get(0x08),
+                results.get(0x09),
+            )
+
+            if self.usb_power is True:
+                # External USB power connected: device measures continuously
+                self._is_dormant = False
+                self._frozen_cycle_count = 0
+                self._last_env_snapshot = current_env_snapshot
+            elif self.usb_power is False:
+                # Running on battery (USB disconnected)
+                if self.hcho_state == 1:
+                    # Fully preheated and active
+                    self._is_dormant = False
+                    self._frozen_cycle_count = 0
+                    self._last_env_snapshot = current_env_snapshot
+                else:
+                    # hcho_state == 0 (preheating OR dormant)
+                    has_valid_readings = any(v is not None for v in current_env_snapshot)
+                    if has_valid_readings and self._last_env_snapshot is not None:
+                        if current_env_snapshot == self._last_env_snapshot:
+                            self._frozen_cycle_count += 1
+                            # On battery, identical readings across consecutive cycles indicates dormant MCU RAM cache
+                            self._is_dormant = True
+                            self._manual_measure_active = False
+                            _LOGGER.debug(
+                                "[SLEEP] Detected frozen sensor snapshot on battery for %s (cycle_count=%d): %s",
+                                self.mac_address, self._frozen_cycle_count, current_env_snapshot
+                            )
+                        else:
+                            # Readings changed / fluctuating (fan is active, sensors sampling)
+                            self._frozen_cycle_count = 0
+                            self._is_dormant = False
+                    elif self._manual_measure_active:
+                        # User recently commanded start measurement via switch
+                        self._is_dormant = False
+                    else:
+                        # First reading on battery with hcho_state == 0 and not manual: default to dormant
+                        self._is_dormant = True
+
+                    if has_valid_readings:
+                        self._last_env_snapshot = current_env_snapshot
 
             # If device is running on battery (USB disconnected) and internal sensors are dormant,
             # suppress stale/frozen environmental readings from MCU RAM.
@@ -2217,3 +2304,116 @@ class EM1003Device:
                         await self.disconnect()
                     except Exception as disconnect_err:
                         _LOGGER.debug("[CONN] Error disconnecting after activate_wifi: %s", disconnect_err)
+
+    async def set_measurement_state(self, turn_on: bool) -> bool:
+        """Start or stop measurement on device.
+
+        Args:
+            turn_on: True to start measurement, False to stop/enter sleep
+
+        Returns:
+            True if command was sent successfully, False otherwise
+        """
+        # Low-battery UVLO safety check (mimicking official APK behavior):
+        # Prevent starting measurement if running on battery and charge <= 10%
+        if turn_on and self.usb_power is False:
+            if self.battery_pct is not None and self.battery_pct <= 10:
+                _LOGGER.warning(
+                    "[MEASURE] Cannot start measurement for %s: battery is too low (%.0f%% <= 10%%) and USB disconnected",
+                    self.mac_address, self.battery_pct
+                )
+                return False
+
+        source = self._get_proxy_source()
+        async with _proxy_ble_session(source):
+            async with self._lock:
+                can_attempt, reason = self._circuit_breaker.can_attempt()
+                if not can_attempt:
+                    _LOGGER.warning(
+                        "[CIRCUIT] Blocked set_measurement_state for %s: %s",
+                        self.mac_address, reason
+                    )
+                    return False
+
+                self._cleanup_expired_requests()
+                already_connected = self._client is not None and self._client.is_connected
+
+                try:
+                    client = await self._ensure_connected()
+
+                    seq_id = self._get_random_sequence_id()
+                    cmd = CMD_START_MEASURE if turn_on else CMD_STOP_MEASURE
+                    arg_byte = 0x00 if turn_on else 0x05
+                    request = bytes([seq_id, cmd, arg_byte])
+
+                    hex_parts = ' '.join([f'{b:02x}' for b in request])
+                    _LOGGER.debug(
+                        "[TX] (%s)[0x %s]",
+                        "发送开始测量命令" if turn_on else "发送停止测量命令",
+                        hex_parts
+                    )
+
+                    pending_request = PendingRequest(
+                        seq_id=seq_id,
+                        sensor_id=cmd,
+                        future=asyncio.Future(),
+                        timestamp=time.time()
+                    )
+                    request_key = (seq_id, cmd)
+                    self._pending_requests[request_key] = pending_request
+
+                    await client.write_gatt_char(EM1003_WRITE_CHAR_UUID, request, response=False)
+
+                    try:
+                        await asyncio.wait_for(pending_request.future, timeout=3.0)
+                        _LOGGER.info(
+                            "[MEASURE] Measurement %s command acknowledged for %s",
+                            "START" if turn_on else "STOP",
+                            self.mac_address
+                        )
+                    except asyncio.TimeoutError:
+                        _LOGGER.warning(
+                            "[MEASURE] No ACK received for measurement %s command on %s (command sent without response)",
+                            "START" if turn_on else "STOP",
+                            self.mac_address
+                        )
+                    finally:
+                        self._pending_requests.pop(request_key, None)
+                        self._used_seq_ids.discard(seq_id)
+
+                    # Update internal state tracking
+                    if turn_on:
+                        self._is_dormant = False
+                        self._frozen_cycle_count = 0
+                        self._manual_measure_active = True
+                    else:
+                        self._is_dormant = True
+                        self._frozen_cycle_count = 0
+                        self._manual_measure_active = False
+                        # Clear stale environmental readings
+                        for env_sid in [0x01, 0x06, 0x08, 0x09, 0x0A, 0x11, 0x12, 0x13]:
+                            self.sensor_data[env_sid] = None
+
+                    self._circuit_breaker.record_success()
+                    return True
+
+                except BleakError as err:
+                    _LOGGER.error("Bleak error setting measurement state for %s: %s", self.mac_address, err)
+                    self._circuit_breaker.record_failure()
+                    self._client = None
+                    return False
+                except Exception as err:
+                    _LOGGER.error(
+                        "[MEASURE] Failed to %s measurement for %s: %s",
+                        "start" if turn_on else "stop",
+                        self.mac_address, err
+                    )
+                    self._circuit_breaker.record_failure()
+                    self._client = None
+                    return False
+                finally:
+                    if not already_connected and self._client and self._client.is_connected:
+                        try:
+                            await self.disconnect()
+                        except Exception as disconnect_err:
+                            _LOGGER.debug("[CONN] Error disconnecting after set_measurement_state: %s", disconnect_err)

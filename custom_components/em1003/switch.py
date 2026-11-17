@@ -1,6 +1,7 @@
 """Switch platform for EM1003 BLE Sensor integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -28,9 +29,17 @@ async def async_setup_entry(
     em1003_device = data["device"]
     coordinator = data.get("coordinator")
 
-    _LOGGER.info("Setting up EM1003 buzzer switch for device: %s (%s)", device_name, mac_address)
+    if coordinator is None:
+        # Wait up to 5 seconds for coordinator to be created by sensor platform
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            coordinator = data.get("coordinator")
+            if coordinator is not None:
+                break
 
-    # Create buzzer switch entity
+    _LOGGER.info("Setting up EM1003 switches for device: %s (%s)", device_name, mac_address)
+
+    # Create switch entities
     async_add_entities([
         EM1003BuzzerSwitch(
             config_entry,
@@ -38,7 +47,14 @@ async def async_setup_entry(
             device_name,
             em1003_device,
             coordinator,
-        )
+        ),
+        EM1003MeasurementSwitch(
+            config_entry,
+            mac_address,
+            device_name,
+            em1003_device,
+            coordinator,
+        ),
     ])
 
 
@@ -208,4 +224,125 @@ class EM1003BuzzerSwitch(SwitchEntity):
         """Return additional attributes."""
         return {
             "mac_address": self._mac_address,
+        }
+
+
+class EM1003MeasurementSwitch(SwitchEntity):
+    """Representation of an EM1003 measurement switch (active measurement vs sleep mode)."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        config_entry: ConfigEntry,
+        mac_address: str,
+        device_name: str,
+        em1003_device,
+        coordinator=None,
+    ) -> None:
+        """Initialize the measurement switch."""
+        self._config_entry = config_entry
+        self._mac_address = mac_address
+        self._device_name = device_name
+        self._em1003_device = em1003_device
+        self._coordinator = coordinator
+
+        self._attr_unique_id = f"{mac_address}_measurement"
+        self._attr_name = "Measuring"
+        self._coordinator_listener = None
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information about this EM1003 device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._mac_address)},
+            name=self._device_name,
+            manufacturer="720",
+            model=getattr(self._em1003_device, "model", "EM1003"),
+            sw_version=getattr(self._em1003_device, "firmware_version", None),
+            serial_number=getattr(self._em1003_device, "sn", None),
+            connections={("mac", self._mac_address)},
+        )
+
+    @property
+    def icon(self) -> str:
+        """Return icon based on measurement state."""
+        return "mdi:fan" if self.is_on else "mdi:fan-off"
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if device is actively measuring."""
+        if self._coordinator and self._coordinator.data and "is_measuring" in self._coordinator.data:
+            return bool(self._coordinator.data["is_measuring"])
+        return bool(self._em1003_device.is_measuring)
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        if self._coordinator:
+            return self._coordinator.last_update_success
+        return True
+
+    async def async_added_to_hass(self) -> None:
+        """Run when entity about to be added to hass."""
+        await super().async_added_to_hass()
+        if self._coordinator:
+            self._coordinator_listener = self._coordinator.async_add_listener(
+                self._handle_coordinator_update
+            )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Run when entity will be removed from hass."""
+        if self._coordinator_listener:
+            self._coordinator_listener()
+            self._coordinator_listener = None
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self.async_write_ha_state()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn on measurement (wake sensors & fan)."""
+        _LOGGER.debug("Starting measurement for %s", self._mac_address)
+        try:
+            success = await self._em1003_device.set_measurement_state(True)
+            if success:
+                _LOGGER.info("Successfully started measurement for %s", self._mac_address)
+                if self._coordinator:
+                    await self._coordinator.async_request_refresh()
+                self.async_write_ha_state()
+            else:
+                _LOGGER.error("Failed to start measurement for %s", self._mac_address)
+                self.async_write_ha_state()
+        except Exception as err:
+            _LOGGER.error("Error starting measurement for %s: %s", self._mac_address, err)
+            self.async_write_ha_state()
+            raise
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn off measurement (enter dormant sleep)."""
+        _LOGGER.debug("Stopping measurement for %s", self._mac_address)
+        try:
+            success = await self._em1003_device.set_measurement_state(False)
+            if success:
+                _LOGGER.info("Successfully stopped measurement for %s", self._mac_address)
+                if self._coordinator:
+                    await self._coordinator.async_request_refresh()
+                self.async_write_ha_state()
+            else:
+                _LOGGER.error("Failed to stop measurement for %s", self._mac_address)
+                self.async_write_ha_state()
+        except Exception as err:
+            _LOGGER.error("Error stopping measurement for %s: %s", self._mac_address, err)
+            self.async_write_ha_state()
+            raise
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra state attributes."""
+        return {
+            "mac_address": self._mac_address,
+            "usb_power": getattr(self._em1003_device, "usb_power", None),
+            "hcho_state": getattr(self._em1003_device, "hcho_state", None),
+            "battery_pct": getattr(self._em1003_device, "battery_pct", None),
         }

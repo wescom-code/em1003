@@ -28,6 +28,8 @@ EM1003_NOTIFY_CHAR_UUID = "0000FFF4-0000-1000-8000-00805F9B34FB"  # Notify chara
 
 # Protocol Commands
 CMD_READ_SENSOR = 0x06  # Command to read sensor data
+CMD_START_MEASURE = 0x12  # 18: Start measurement cycle / wake sensors & fan
+CMD_STOP_MEASURE = 0x13  # 19: Stop measurement cycle / dormant sleep
 CMD_READ_SN = 0x15  # 21: Read Serial Number
 CMD_READ_WIFI_CURRENT_STATE = 0x19  # 25: Read WiFi & Cloud status
 CMD_READ_PLACEID = 0x23  # 35: Read Place ID

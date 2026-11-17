@@ -26,6 +26,7 @@ from .const import (
     DOMAIN,
     CONF_MAC_ADDRESS,
     SENSOR_ID_05,
+    SENSOR_ID_0A,
     SENSOR_TYPES,
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
@@ -274,6 +275,10 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
             dev = getattr(self.coordinator, "em1003_device", None)
             if dev and not dev.is_measuring:
                 return False
+            # Formaldehyde specifically requires hcho_state == 1 (warm-up complete)
+            if self._sensor_id == SENSOR_ID_0A:
+                if dev and dev.hcho_state != 1:
+                    return False
 
         # Check if we have fresh data from coordinator
         if self.coordinator.last_update_success:
@@ -299,6 +304,10 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
             dev = getattr(self.coordinator, "em1003_device", None)
             if dev and not dev.is_measuring:
                 return None
+            # Formaldehyde specifically requires hcho_state == 1 (warm-up complete)
+            if self._sensor_id == SENSOR_ID_0A:
+                if dev and dev.hcho_state != 1:
+                    return None
 
         # Get current value from coordinator
         current_value = None
