@@ -1,6 +1,6 @@
 # EM1003 环境宝3 蓝牙传感器 | BLE Sensor Integration
 
-[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/fooling/em1003)
+[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](https://github.com/fooling/em1003)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-brightgreen.svg)](https://www.home-assistant.io/)
 [![HACS](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz/)
 
@@ -13,16 +13,19 @@
 ### 概述
 
 这是一个专为 **720环境宝3（EM1003）** 打造的 Home Assistant 蓝牙（BLE）自定义集成组件。
-版本 **2.0.0** 实现了全面的逆向工程协议支持，不仅涵盖 8 项核心空气质量指标，还新增了电池电量、充电状态、蜂鸣器控制、Wi-Fi 与云端通讯状态、外接 USB 供电状态以及蓝牙即插即用自动发现（Auto Discovery）。
+版本 **2.1.0** 实现了全面的逆向工程协议支持，不仅涵盖 8 项核心空气质量指标，还新增了测量控制开关（主动唤醒/休眠）、智能休眠防冻结识别（Snapshot Diff）、快速感测器解耦、电池电量与充电状态、蜂鸣器控制、Wi-Fi 与云端通讯状态、外接 USB 供电状态以及蓝牙即插即用自动发现（Auto Discovery）。
 
 ### 1. 特色功能
 
 - 🔍 **蓝牙即插即用自动发现（Auto Discovery）**：支持匹配 `3GC*`、`CG3*`、`EM1003*`、`720*` 广播名称。设备开机后，Home Assistant 的「设备与服务」会自动弹出发现卡片，一键即可配对完成。
 - 📊 **8 项核心空气质量监测**：温度、湿度、噪音、PM2.5、PM10、甲醛、TVOC、eCO2，均采用经过逆向工程验证的 Little Endian 解码与校准公式。
-- 🔋 **电池与供电监测**：支持电池电量百分比（0-100%）、电池充电中状态、以及外接 USB 电源接通状态。
+- ⚡ **智能休眠检测与快照防冻结（Snapshot Diff）**：彻底解决官方拔掉 USB 供电后传感器断电但蓝牙仍持续回传 MCU RAM 冻结旧值的问题；插电时持续监测，电池供电时自动识别休眠状态并抑制陈旧数据，将失效实体标记为不可用。
+- 🔄 **测量控制开关与解耦预热**：新增测量开关（`switch.*_measuring`）支持在 HA 中唤醒/停止采样；解耦温湿度/PM/噪音与甲醛预热期，电池开机即可秒级获取环境活数据，并内置 $\le 10\%$ 低电量欠压保护。
+- 🔋 **电池与供电监测**：支持电池电量百分比（0-100%）、电池充电中状态、以及外接 USB 电源接通状态（配合 USB 状态交叉校验消除硬件误报）。
 - 🔔 **蜂鸣器控制（Switch）**：支持在 Home Assistant 中直接开启/关闭环境宝的报警蜂鸣器（注：原厂固件在设备每次重启时蜂鸣器默认开启）。
 - 📶 **Wi-Fi 与云端状态监测**：即使官方云端停服，也能实时读取设备内部的 Wi-Fi 连接状态代号、云端上报通道状态，并提供激活 Wi-Fi 网络的快捷按钮。
 - 🛡️ **高可靠性连接架构**：
+  - **分 Proxy 独立蓝牙锁（Per-Proxy Lock）**：不同蓝牙代理/适配器并发通讯，同代理内部严格序列化，杜绝 ESP_GATT_ERROR 与槽位耗尽。
   - **单会话批量读取**：每次轮询在同一 BLE 连接会话中依次读取所有数据并立即断开，杜绝蓝牙连接槽位（Connection Slot）耗尽问题。
   - **断路器（Circuit Breaker）**：遇到信号微弱或通讯异常时自动熔断并退避，保护主机资源与设备电池。
   - **传感器预热保护**：自动过滤开机预热阶段的异常负温与零值，避免历史图表被脏数据污染。
@@ -48,8 +51,10 @@
 | **TVOC** | `sensor.*_tvoc` | 主感测器 | **启用** | µg/m³，总挥发性有机物 |
 | **eCO2** | `sensor.*_eco2` | 主感测器 | **启用** | ppm，等效二氧化碳浓度 |
 | **电池电量** | `sensor.*_battery` | 主感测器 | **启用** | %，0~100% 剩余电量 |
+| **测量开关** | `switch.*_measuring` | 主控制器 | **启用** | 唤醒风扇与传感器开始采样 / 停止休眠 |
 | **蜂鸣器开关** | `switch.*_buzzer` | 设定 (CONFIG) | **启用** | 控制设备蜂鸣器开/关 |
 | **激活 Wi-Fi 按钮** | `button.*_activate_wifi` | 设定 (CONFIG) | *停用* | 发送 `0x2E` 激活已配置的 Wi-Fi 档案 |
+| **测量活跃状态** | `binary_sensor.*_measuring` | 诊断 (DIAGNOSTIC) | **启用** | 传感器处于活跃采样中为 `on`，休眠为 `off` |
 | **电池充电中** | `binary_sensor.*_battery_charging` | 诊断 (DIAGNOSTIC) | **启用** | 接通电源且处于充电状态时为 `on` |
 | **外接 USB 供电** | `binary_sensor.*_usb_power` | 诊断 (DIAGNOSTIC) | *停用* | USB 外接电源接通时为 `on` |
 | **Wi-Fi 连线状态** | `binary_sensor.*_wifi_connected` | 诊断 (DIAGNOSTIC) | *停用* | 连线成功时为 `on` |
@@ -68,7 +73,7 @@
 1. 在 Home Assistant 中打开 **HACS**。
 2. 点击右上角 **⋮** 菜单，选择 **自定义存储库 (Custom repositories)**。
 3. 填写存储库地址：`https://github.com/fooling/em1003`，类别选择 `Integration`（集成），点击 **添加**。
-4. 在 HACS 列表中搜索 **"EM1003"**，点击进入并点击右下角 **下载** 最新版本（2.0.0）。
+4. 在 HACS 列表中搜索 **"EM1003"**，点击进入并点击右下角 **下载** 最新版本（2.1.0）。
 5. **重启 Home Assistant**。
 6. 重启后：
    - **自动发现**：若设备在附近且开机，HA「设备与服务」会自动弹出通知，点击确认即可。
@@ -94,6 +99,8 @@
 | 功能 | 请求格式 | 响应格式 | 备注 |
 | :--- | :--- | :--- | :--- |
 | **读取传感器** | `[seq] 0x06 [sensor_id]` | `[seq] 0x06 [sensor_id] [低位] [高位]` | Little Endian，两字节无符号整数 |
+| **开始测量** | `[seq] 0x12 0x00` | `[seq] 0x12` | 唤醒风扇与传感器开始采样 |
+| **停止测量** | `[seq] 0x13 0x05` | `[seq] 0x13` | 停止采样，进入休眠省电模式 |
 | **读取蜂鸣器状态** | `[seq] 0x50 0x00` | `[seq] 0x50 0x00 [0x00关/0x01开]` | 查询当前蜂鸣器开关状态 |
 | **设置蜂鸣器** | `[seq] 0x50 0x01 [0x00关/0x01开]` | `[seq] 0x05 0x01` | 设置后附带回读校验 |
 | **读取 Wi-Fi/云端状态** | `[seq] 0x19 0x00` | `[seq] 0x19 [组数] [当前索引] [Wi-Fi状态] [云端状态] [扫描标志]` | 完整解析 Wi-Fi 与云端网络状况 |
@@ -120,16 +127,19 @@
 ### Overview
 
 A comprehensive Home Assistant custom integration for the **EM1003 BLE Sensor** (720 Air Quality Monitor 3).
-Version **2.0.0** introduces a fully reverse-engineered protocol implementation that supports 8 core environmental metrics, battery level and charging status, buzzer configuration, Wi-Fi and cloud connection diagnostic sensors, external USB power detection, and seamless Bluetooth Auto-Discovery.
+Version **2.1.0** introduces a fully reverse-engineered protocol implementation that supports 8 core environmental metrics, active measurement control switch, snapshot-difference dormant detection, sensor readiness decoupling, battery level and charging status, buzzer configuration, Wi-Fi and cloud connection diagnostic sensors, external USB power detection, and seamless Bluetooth Auto-Discovery.
 
 ### 1. Key Features
 
 - 🔍 **Bluetooth Auto-Discovery**: Matches broadcast local names (`3GC*`, `CG3*`, `EM1003*`, `720*`). Nearby powered-on devices automatically appear as discovered on the Home Assistant Devices page.
 - 📊 **8 Core Air Quality Metrics**: Temperature, Humidity, Noise, PM2.5, PM10, Formaldehyde, TVOC, and eCO2 using confirmed Little Endian formulas.
-- 🔋 **Battery & Power Management**: Battery level percentage (0-100%), charging binary sensor, and USB external power detection.
+- ⚡ **Snapshot-Difference Dormant Detection**: Solves the manufacturer behavior where sensors power down upon unplugging USB power while the BLE MCU keeps returning frozen RAM values; continuously monitors on AC power, and marks entities as unavailable when dormant on battery.
+- 🔄 **Measurement Control Switch & Decoupled Warmup**: New measurement switch (`switch.*_measuring`) enables waking/stopping sampling directly from Home Assistant; fast sensors (temp, humidity, noise, PM) report live data immediately on battery start without waiting for formaldehyde's 3-minute warmup, with built-in $\le 10\%$ UVLO low-battery protection.
+- 🔋 **Battery & Power Management**: Battery level percentage (0-100%), charging binary sensor cross-validated with USB power to eliminate false positives, and USB external power detection.
 - 🔔 **Buzzer Control Switch**: Turn the internal alert buzzer on or off directly from Home Assistant (firmware defaults buzzer to ON after device reboot).
 - 📶 **Wi-Fi & Cloud Diagnostics**: Monitor internal Wi-Fi connection states, cloud reporting status codes, and trigger Wi-Fi network profile activation.
 - 🛡️ **Robust Architecture**:
+  - **Per-Proxy Bluetooth Locks**: Serializes commands per Bluetooth proxy/adapter while allowing parallel requests across different adapters.
   - **Single-Session Batch Polling**: Reads all sensors, battery, buzzer, and Wi-Fi status within a single BLE connection session, preventing BLE connection slot exhaustion.
   - **Circuit Breaker**: Protects the device and Home Assistant host from Bluetooth hangs with automatic backoff.
   - **Warmup Outlier Rejection**: Discards cold-boot negative temperatures and sensor warmup artifacts.
@@ -155,8 +165,10 @@ Version **2.0.0** introduces a fully reverse-engineered protocol implementation 
 | **TVOC** | `sensor.*_tvoc` | Primary | **Enabled** | µg/m³, total volatile organic compounds |
 | **eCO2** | `sensor.*_eco2` | Primary | **Enabled** | ppm, equivalent carbon dioxide |
 | **Battery Level** | `sensor.*_battery` | Primary | **Enabled** | %, 0-100% remaining charge |
+| **Measuring Switch** | `switch.*_measuring` | Primary | **Enabled** | Wake fan & sensors for active sampling / stop to sleep |
 | **Buzzer Switch** | `switch.*_buzzer` | Configuration | **Enabled** | Turn internal buzzer ON or OFF |
 | **Activate Wi-Fi Button** | `button.*_activate_wifi` | Configuration | *Disabled* | Send `0x2E` to reconnect saved Wi-Fi |
+| **Measuring State** | `binary_sensor.*_measuring` | Diagnostic | **Enabled** | `on` when actively measuring; `off` when sleeping |
 | **Battery Charging** | `binary_sensor.*_battery_charging` | Diagnostic | **Enabled** | `on` when connected to power and charging |
 | **USB Power Connected** | `binary_sensor.*_usb_power` | Diagnostic | *Disabled* | `on` when external USB cable is plugged in |
 | **Wi-Fi Connected** | `binary_sensor.*_wifi_connected` | Diagnostic | *Disabled* | `on` when device Wi-Fi connection succeeds |
@@ -173,7 +185,7 @@ Version **2.0.0** introduces a fully reverse-engineered protocol implementation 
 1. Open **HACS** in Home Assistant.
 2. Click **⋮** (top right) > **Custom repositories**.
 3. Add repository URL `https://github.com/fooling/em1003` with category `Integration`.
-4. Search for **"EM1003"** in HACS and download version 2.0.0.
+4. Search for **"EM1003"** in HACS and download version 2.1.0.
 5. **Restart Home Assistant**.
 6. After restart, the device will be automatically discovered in **Settings > Devices & Services**, or you can add it manually from the integration list.
 
@@ -197,6 +209,8 @@ Service UUID: 09de2880-1415-4e2c-a48a-3938e3288537
 | Feature | Request | Response | Details |
 | :--- | :--- | :--- | :--- |
 | **Read Sensor** | `[seq] 0x06 [sensor_id]` | `[seq] 0x06 [sensor_id] [low] [high]` | Little Endian 16-bit unsigned int |
+| **Start Measure** | `[seq] 0x12 0x00` | `[seq] 0x12` | Wakes fan and sensors for sampling |
+| **Stop Measure** | `[seq] 0x13 0x05` | `[seq] 0x13` | Stops sampling, enters low-power sleep |
 | **Query Buzzer** | `[seq] 0x50 0x00` | `[seq] 0x50 0x00 [0x00/0x01]` | `0x00`=OFF, `0x01`=ON |
 | **Set Buzzer** | `[seq] 0x50 0x01 [state]` | `[seq] 0x05 0x01` | Sets state and verifies via query |
 | **Read Wi-Fi / Cloud** | `[seq] 0x19 0x00` | `[seq] 0x19 [profiles] [idx] [wifi_state] [cloud_state] [scan_done]` | Detailed network status |
