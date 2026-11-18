@@ -1627,15 +1627,34 @@ class EM1003Device:
                     self._is_dormant = False
                     self._frozen_cycle_count = 0
                     self._last_env_snapshot = current_env_snapshot
+                elif self._manual_measure_active:
+                    # User explicitly started measurement via switch
+                    # Keep is_dormant = False so sensors and switch remain active immediately
+                    self._is_dormant = False
+                    has_valid_readings = any(v is not None for v in current_env_snapshot)
+                    if has_valid_readings and self._last_env_snapshot is not None:
+                        if current_env_snapshot == self._last_env_snapshot:
+                            self._frozen_cycle_count += 1
+                            # Only consider auto-sleep if frozen for 2+ consecutive cycles after starting
+                            if self._frozen_cycle_count >= 2:
+                                self._is_dormant = True
+                                self._manual_measure_active = False
+                                _LOGGER.debug(
+                                    "[SLEEP] Device auto-slept on battery after measurement for %s (cycle_count=%d)",
+                                    self.mac_address, self._frozen_cycle_count
+                                )
+                        else:
+                            self._frozen_cycle_count = 0
+                    if has_valid_readings:
+                        self._last_env_snapshot = current_env_snapshot
                 else:
-                    # hcho_state == 0 (preheating OR dormant)
+                    # Not manual measure, hcho_state == 0: check if physical button was pressed on device
                     has_valid_readings = any(v is not None for v in current_env_snapshot)
                     if has_valid_readings and self._last_env_snapshot is not None:
                         if current_env_snapshot == self._last_env_snapshot:
                             self._frozen_cycle_count += 1
                             # On battery, identical readings across consecutive cycles indicates dormant MCU RAM cache
                             self._is_dormant = True
-                            self._manual_measure_active = False
                             _LOGGER.debug(
                                 "[SLEEP] Detected frozen sensor snapshot on battery for %s (cycle_count=%d): %s",
                                 self.mac_address, self._frozen_cycle_count, current_env_snapshot
@@ -1644,9 +1663,6 @@ class EM1003Device:
                             # Readings changed / fluctuating (fan is active, sensors sampling)
                             self._frozen_cycle_count = 0
                             self._is_dormant = False
-                    elif self._manual_measure_active:
-                        # User recently commanded start measurement via switch
-                        self._is_dormant = False
                     else:
                         # First reading on battery with hcho_state == 0 and not manual: default to dormant
                         self._is_dormant = True
@@ -2386,10 +2402,12 @@ class EM1003Device:
                         self._is_dormant = False
                         self._frozen_cycle_count = 0
                         self._manual_measure_active = True
+                        self._last_env_snapshot = None
                     else:
                         self._is_dormant = True
                         self._frozen_cycle_count = 0
                         self._manual_measure_active = False
+                        self._last_env_snapshot = None
                         # Clear stale environmental readings
                         for env_sid in [0x01, 0x06, 0x08, 0x09, 0x0A, 0x11, 0x12, 0x13]:
                             self.sensor_data[env_sid] = None

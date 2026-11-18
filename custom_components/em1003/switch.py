@@ -249,6 +249,7 @@ class EM1003MeasurementSwitch(SwitchEntity):
 
         self._attr_unique_id = f"{mac_address}_measurement"
         self._attr_name = "Measuring"
+        self._attr_is_on = bool(self._em1003_device.is_measuring)
         self._coordinator_listener = None
 
     @property
@@ -272,6 +273,8 @@ class EM1003MeasurementSwitch(SwitchEntity):
     @property
     def is_on(self) -> bool:
         """Return True if device is actively measuring."""
+        if self._attr_is_on is not None:
+            return self._attr_is_on
         if self._coordinator and self._coordinator.data and "is_measuring" in self._coordinator.data:
             return bool(self._coordinator.data["is_measuring"])
         return bool(self._em1003_device.is_measuring)
@@ -290,6 +293,8 @@ class EM1003MeasurementSwitch(SwitchEntity):
             self._coordinator_listener = self._coordinator.async_add_listener(
                 self._handle_coordinator_update
             )
+            if self._coordinator.data and "is_measuring" in self._coordinator.data:
+                self._attr_is_on = bool(self._coordinator.data["is_measuring"])
 
     async def async_will_remove_from_hass(self) -> None:
         """Run when entity will be removed from hass."""
@@ -299,6 +304,10 @@ class EM1003MeasurementSwitch(SwitchEntity):
 
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
+        if self._coordinator and self._coordinator.data and "is_measuring" in self._coordinator.data:
+            self._attr_is_on = bool(self._coordinator.data["is_measuring"])
+        else:
+            self._attr_is_on = bool(self._em1003_device.is_measuring)
         self.async_write_ha_state()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
@@ -307,15 +316,20 @@ class EM1003MeasurementSwitch(SwitchEntity):
         try:
             success = await self._em1003_device.set_measurement_state(True)
             if success:
+                self._attr_is_on = True
+                if self._coordinator and self._coordinator.data:
+                    self._coordinator.data["is_measuring"] = True
+                self.async_write_ha_state()
                 _LOGGER.info("Successfully started measurement for %s", self._mac_address)
                 if self._coordinator:
                     await self._coordinator.async_request_refresh()
-                self.async_write_ha_state()
             else:
                 _LOGGER.error("Failed to start measurement for %s", self._mac_address)
+                self._attr_is_on = self._em1003_device.is_measuring
                 self.async_write_ha_state()
         except Exception as err:
             _LOGGER.error("Error starting measurement for %s: %s", self._mac_address, err)
+            self._attr_is_on = self._em1003_device.is_measuring
             self.async_write_ha_state()
             raise
 
@@ -325,15 +339,22 @@ class EM1003MeasurementSwitch(SwitchEntity):
         try:
             success = await self._em1003_device.set_measurement_state(False)
             if success:
+                self._attr_is_on = False
+                if self._coordinator and self._coordinator.data:
+                    self._coordinator.data["is_measuring"] = False
+                    for env_sid in [0x01, 0x06, 0x08, 0x09, 0x0A, 0x11, 0x12, 0x13]:
+                        self._coordinator.data[env_sid] = None
+                self.async_write_ha_state()
                 _LOGGER.info("Successfully stopped measurement for %s", self._mac_address)
                 if self._coordinator:
                     await self._coordinator.async_request_refresh()
-                self.async_write_ha_state()
             else:
                 _LOGGER.error("Failed to stop measurement for %s", self._mac_address)
+                self._attr_is_on = self._em1003_device.is_measuring
                 self.async_write_ha_state()
         except Exception as err:
             _LOGGER.error("Error stopping measurement for %s: %s", self._mac_address, err)
+            self._attr_is_on = self._em1003_device.is_measuring
             self.async_write_ha_state()
             raise
 
