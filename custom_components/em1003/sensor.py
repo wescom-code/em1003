@@ -14,6 +14,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import (
@@ -256,7 +257,7 @@ class EM1003Sensor(CoordinatorEntity, SensorEntity):
             model=getattr(dev, "model", "EM1003"),
             sw_version=getattr(dev, "firmware_version", None),
             serial_number=getattr(dev, "sn", None),
-            connections={("mac", self._mac_address)},
+            connections={(dr.CONNECTION_BLUETOOTH, self._mac_address)},
         )
 
     @property
@@ -424,7 +425,7 @@ class EM1003WifiStatusSensor(CoordinatorEntity, SensorEntity):
             model=getattr(dev, "model", "EM1003"),
             sw_version=getattr(dev, "firmware_version", None),
             serial_number=getattr(dev, "sn", None),
-            connections={("mac", self._mac_address)},
+            connections={(dr.CONNECTION_BLUETOOTH, self._mac_address)},
         )
 
     @property
@@ -527,7 +528,7 @@ class EM1003CloudStatusSensor(CoordinatorEntity, SensorEntity):
             model=getattr(dev, "model", "EM1003"),
             sw_version=getattr(dev, "firmware_version", None),
             serial_number=getattr(dev, "sn", None),
-            connections={("mac", self._mac_address)},
+            connections={(dr.CONNECTION_BLUETOOTH, self._mac_address)},
         )
 
     @property

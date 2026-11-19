@@ -117,7 +117,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register device in device registry before creating entities
     device_registry = dr.async_get(hass)
-    device_registry.async_get_or_create(
+    device_entry = device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, mac_address)},
         name=device_name,
@@ -125,8 +125,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         model=getattr(em1003_device, "model", "EM1003"),
         sw_version=getattr(em1003_device, "firmware_version", None),
         serial_number=getattr(em1003_device, "sn", None),
-        connections={("mac", mac_address)},
+        connections={(dr.CONNECTION_BLUETOOTH, mac_address)},
     )
+    # Clean up legacy 'mac' connection if present from previous versions
+    legacy_mac_types = {"mac", getattr(dr, "CONNECTION_NETWORK_MAC", "mac")}
+    if any(conn[0] in legacy_mac_types for conn in device_entry.connections):
+        cleaned_connections = {
+            conn for conn in device_entry.connections if conn[0] not in legacy_mac_types
+        }
+        cleaned_connections.add((dr.CONNECTION_BLUETOOTH, mac_address))
+        device_registry.async_update_device(
+            device_entry.id,
+            new_connections=cleaned_connections,
+        )
+        _LOGGER.info("Cleaned up legacy MAC connection for device: %s", device_name)
     _LOGGER.info("Device registered in device registry: %s", device_name)
 
     # Store device info in hass.data

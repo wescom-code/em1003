@@ -7,6 +7,7 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -76,7 +77,7 @@ class EM1003ActivateWifiButton(ButtonEntity):
             model=getattr(self._em1003_device, "model", "EM1003"),
             sw_version=getattr(self._em1003_device, "firmware_version", None),
             serial_number=getattr(self._em1003_device, "sn", None),
-            connections={("mac", self._mac_address)},
+            connections={(dr.CONNECTION_BLUETOOTH, self._mac_address)},
         )
 
     async def async_press(self) -> None:
